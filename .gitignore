@@ -1,0 +1,32 @@
+output/
+!output/README.md
+__pycache__/
+input/
+!input/README.md
+*.egg-info/
+
+# Build and distribution
+build/
+dist/
+*.egg
+.eggs/
+
+# Development
+.pytest_cache/
+.coverage
+htmlcov/
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+.DS_Store
+Thumbs.db
+
+node_modules/
+.*
+!.github
+!.gitignore
+*_playground/
+.venv/

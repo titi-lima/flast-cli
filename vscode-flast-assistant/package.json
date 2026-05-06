@@ -1,0 +1,105 @@
+{
+  "name": "flast-assistant",
+  "displayName": "Flast Assistant",
+  "description": "Surface FLAST flaky-test predictions as VS Code diagnostics.",
+  "version": "0.1.0",
+  "publisher": "flast",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Testing"
+  ],
+  "activationEvents": [
+    "onCommand:flast.initializeWorkspace",
+    "onCommand:flast.observeTestRuns",
+    "onCommand:flast.trainModel",
+    "onCommand:flast.refreshDiagnostics",
+    "onCommand:flast.openLatestReport",
+    "onLanguage:python"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "flast.initializeWorkspace",
+        "title": "Flast: Initialize Workspace"
+      },
+      {
+        "command": "flast.observeTestRuns",
+        "title": "Flast: Observe Test Runs"
+      },
+      {
+        "command": "flast.trainModel",
+        "title": "Flast: Train Model"
+      },
+      {
+        "command": "flast.refreshDiagnostics",
+        "title": "Flast: Refresh Diagnostics"
+      },
+      {
+        "command": "flast.openLatestReport",
+        "title": "Flast: Open Latest Report"
+      }
+    ],
+    "configuration": {
+      "title": "Flast",
+      "properties": {
+        "flast.executablePath": {
+          "type": "string",
+          "default": "flast",
+          "description": "Command or absolute path used to invoke FLAST."
+        },
+        "flast.projectDir": {
+          "type": "string",
+          "default": "",
+          "description": "Project root for FLAST commands. Defaults to the first workspace folder."
+        },
+        "flast.pytestArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments forwarded to pytest by FLAST."
+        },
+        "flast.refreshMode": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "onSave"
+          ],
+          "default": "manual",
+          "description": "When to refresh FLAST diagnostics."
+        },
+        "flast.warningThreshold": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum FLAST score shown as a diagnostic."
+        },
+        "flast.diagnosticSeverity": {
+          "type": "string",
+          "enum": [
+            "warning",
+            "information"
+          ],
+          "default": "warning",
+          "description": "Diagnostic severity used for flaky predictions above the threshold."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.5"
+  }
+}
