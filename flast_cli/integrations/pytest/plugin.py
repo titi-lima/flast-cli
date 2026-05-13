@@ -79,7 +79,7 @@ class _ManifestWriterPlugin:
             framework="pytest",
             run_id=self._manifest_path.parent.name,
             project_root=str(Path(str(session.config.rootpath)).resolve()),
-            pytest_version=pytest.__version__,
+            tool={"name": "pytest", "version": pytest.__version__},
             collected=[CollectedTest(test_id=nodeid) for nodeid in self._collected],
             outcomes=[
                 TestOutcome(test_id=test_id, outcome=outcome)

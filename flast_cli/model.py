@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
@@ -46,6 +46,36 @@ class TrainedArtifacts:
     vectorizer: CountVectorizer
     projection: Optional[SparseRandomProjection]
     metadata: dict
+    training_index: List[LabelRecord]
+
+
+@dataclass(frozen=True)
+class NeighborEvidence:
+    test_id: str
+    label: str
+    distance: float
+    score_contribution: float
+    reason: str
+    total_observations: int
+    outcome_counts: Dict[str, int]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "test_id": self.test_id,
+            "label": self.label,
+            "distance": self.distance,
+            "score_contribution": self.score_contribution,
+            "reason": self.reason,
+            "total_observations": self.total_observations,
+            "outcome_counts": dict(self.outcome_counts),
+        }
+
+
+@dataclass(frozen=True)
+class ExplainedPrediction:
+    score: float
+    predicted_label: str
+    nearest_examples: List[NeighborEvidence]
 
 
 def _project_features(
@@ -124,11 +154,16 @@ def train_model(
     vectorizer_path = model_artifact_path(project_root, "vectorizer.joblib")
     projection_path = model_artifact_path(project_root, "projection.joblib")
     metadata_path = model_artifact_path(project_root, "metadata.json")
+    training_index_path = model_artifact_path(project_root, "training_index.json")
 
     joblib.dump(model, model_path)
     joblib.dump(vectorizer, vectorizer_path)
     joblib.dump(projection, projection_path)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    training_index_path.write_text(
+        json.dumps([label.to_dict() for label, _ in labeled], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return metadata
 
 
@@ -137,6 +172,7 @@ def load_trained_artifacts(project_root: Path) -> TrainedArtifacts:
     vectorizer_path = model_artifact_path(project_root, "vectorizer.joblib")
     projection_path = model_artifact_path(project_root, "projection.joblib")
     metadata_path = model_artifact_path(project_root, "metadata.json")
+    training_index_path = model_artifact_path(project_root, "training_index.json")
     if not model_path.exists() or not vectorizer_path.exists() or not metadata_path.exists():
         raise FileNotFoundError(
             f"Missing trained model artifacts under {model_path.parent}"
@@ -153,6 +189,12 @@ def load_trained_artifacts(project_root: Path) -> TrainedArtifacts:
         vectorizer=joblib.load(vectorizer_path),
         projection=joblib.load(projection_path) if projection_path.exists() else None,
         metadata=metadata,
+        training_index=[
+            LabelRecord(**item)
+            for item in json.loads(training_index_path.read_text(encoding="utf-8"))
+        ]
+        if training_index_path.exists()
+        else [],
     )
 
 
@@ -160,6 +202,17 @@ def predict_scores(
     artifacts: TrainedArtifacts,
     feature_texts: Sequence[str],
 ) -> Tuple[np.ndarray, np.ndarray]:
+    explained = predict_with_explanations(artifacts, feature_texts)
+    return (
+        np.array([item.score for item in explained]),
+        np.array([1 if item.predicted_label == "flaky" else 0 for item in explained]),
+    )
+
+
+def predict_with_explanations(
+    artifacts: TrainedArtifacts,
+    feature_texts: Sequence[str],
+) -> List[ExplainedPrediction]:
     matrix = artifacts.vectorizer.transform(feature_texts)
     matrix, _ = _project_features(
         matrix,
@@ -170,17 +223,18 @@ def predict_scores(
     distances, neighbors = artifacts.model.kneighbors(matrix)
     labels = np.asarray(artifacts.model._y)  # populated by sklearn during fit
     sigma = float(artifacts.metadata["params"]["sigma"])
-    scores: List[float] = []
-    predictions: List[int] = []
+    explained: List[ExplainedPrediction] = []
 
     for row_distances, row_neighbors in zip(distances, neighbors):
         phi = 0.0
         psi = 0.0
+        weighted_neighbors = []
         for distance, neighbor in zip(row_distances, row_neighbors):
             if artifacts.model.weights == "distance":
                 weight = (1.0 / distance) if distance != 0 else float("inf")
             else:
                 weight = 1.0
+            weighted_neighbors.append((float(distance), int(neighbor), float(weight)))
             if labels[neighbor] == 1:
                 phi += weight
             else:
@@ -196,7 +250,65 @@ def predict_scores(
             score = 0.0
         else:
             score = phi / (phi + psi)
-        scores.append(float(score))
-        predictions.append(1 if score >= sigma else 0)
 
-    return np.array(scores), np.array(predictions)
+        nearest_examples = _neighbor_evidence(
+            training_index=artifacts.training_index,
+            labels=labels,
+            weighted_neighbors=weighted_neighbors,
+            phi=phi,
+            psi=psi,
+        )
+        explained.append(
+            ExplainedPrediction(
+                score=float(score),
+                predicted_label="flaky" if score >= sigma else "non_flaky",
+                nearest_examples=nearest_examples,
+            )
+        )
+
+    return explained
+
+
+def _neighbor_evidence(
+    *,
+    training_index: Sequence[LabelRecord],
+    labels: np.ndarray,
+    weighted_neighbors: Sequence[Tuple[float, int, float]],
+    phi: float,
+    psi: float,
+) -> List[NeighborEvidence]:
+    if not training_index:
+        return []
+
+    denominator = phi + psi
+    infinite_neighbors = [
+        (distance, neighbor, weight)
+        for distance, neighbor, weight in weighted_neighbors
+        if weight == float("inf")
+    ]
+    examples: List[NeighborEvidence] = []
+    for distance, neighbor, weight in weighted_neighbors:
+        if neighbor >= len(training_index):
+            continue
+        label_record = training_index[neighbor]
+        if infinite_neighbors:
+            matching_exact = [item for item in infinite_neighbors if labels[item[1]] == labels[neighbor]]
+            contribution = 1.0 / len(matching_exact) if matching_exact else 0.0
+        elif denominator == 0:
+            contribution = 0.0
+        else:
+            contribution = weight / denominator
+        if labels[neighbor] == 0:
+            contribution *= -1.0
+        examples.append(
+            NeighborEvidence(
+                test_id=label_record.test_id,
+                label=label_record.label,
+                distance=float(distance),
+                score_contribution=float(contribution),
+                reason=label_record.reason,
+                total_observations=label_record.total_observations,
+                outcome_counts=dict(label_record.outcome_counts),
+            )
+        )
+    return examples

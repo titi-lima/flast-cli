@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
-from ..schemas import FeatureInput, RunManifest
+from ..schemas import FeatureInput, PredictionRecord, RunManifest
 
 
 class FrameworkAdapter(ABC):
@@ -18,7 +18,7 @@ class FrameworkAdapter(ABC):
         *,
         project_root: Path,
         manifest_path: Path,
-        pytest_args: Sequence[str],
+        framework_args: Sequence[str],
     ) -> List[str]:
         raise NotImplementedError
 
@@ -28,7 +28,7 @@ class FrameworkAdapter(ABC):
         *,
         project_root: Path,
         manifest_path: Path,
-        pytest_args: Sequence[str],
+        framework_args: Sequence[str],
     ) -> List[str]:
         raise NotImplementedError
 
@@ -37,5 +37,22 @@ class FrameworkAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def run(
+        self,
+        *,
+        project_root: Path,
+        command: Sequence[str],
+    ) -> Tuple[int, str, str]:
+        raise NotImplementedError
+
+    @abstractmethod
     def resolve_feature_input(self, test_id: str, project_root: Path) -> FeatureInput:
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_prediction_line(
+        self,
+        prediction: PredictionRecord,
+        project_root: Path,
+    ) -> Optional[int]:
         raise NotImplementedError

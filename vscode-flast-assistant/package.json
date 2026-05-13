@@ -18,7 +18,7 @@
     "onCommand:flast.trainModel",
     "onCommand:flast.refreshDiagnostics",
     "onCommand:flast.openLatestReport",
-    "onLanguage:python"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -57,13 +57,42 @@
           "default": "",
           "description": "Project root for FLAST commands. Defaults to the first workspace folder."
         },
+        "flast.framework": {
+          "type": "string",
+          "default": "pytest",
+          "description": "Framework provider used by FLAST commands."
+        },
+        "flast.frameworkArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments forwarded to the selected framework provider by FLAST."
+        },
+        "flast.languageIds": {
+          "type": "array",
+          "default": [
+            "python",
+            "javascript",
+            "typescript",
+            "javascriptreact",
+            "typescriptreact",
+            "java"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "VS Code language IDs that can trigger on-save diagnostics refresh."
+        },
         "flast.pytestArgs": {
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
           },
-          "description": "Arguments forwarded to pytest by FLAST."
+          "description": "Deprecated. Use flast.frameworkArgs instead.",
+          "deprecationMessage": "Use flast.frameworkArgs instead."
         },
         "flast.refreshMode": {
           "type": "string",

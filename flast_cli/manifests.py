@@ -45,7 +45,13 @@ def load_manifest(path: Path) -> RunManifest:
         framework=payload["framework"],
         run_id=payload["run_id"],
         project_root=payload["project_root"],
-        pytest_version=payload.get("pytest_version", "unknown"),
+        tool=payload.get(
+            "tool",
+            {
+                "name": payload["framework"],
+                "version": payload.get("pytest_version", "unknown"),
+            },
+        ),
         collected=collected,
         outcomes=outcomes,
     )

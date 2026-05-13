@@ -31,7 +31,7 @@ USAGE_TEXT = """# FLAST workspace
 
 This directory is managed by `flast`.
 
-- `runs/` stores normalized Pytest manifests for observed and predicted runs.
+- `runs/` stores normalized framework manifests for observed and predicted runs.
 - `corpus/observations.jsonl` stores aggregated per-test outcome history.
 - `corpus/labels.jsonl` stores derived labels (`flaky`, `non_flaky`, `unlabeled`).
 - `models/latest/` stores the latest trained model artifacts.

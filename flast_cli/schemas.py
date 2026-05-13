@@ -30,7 +30,7 @@ class RunManifest:
     framework: str
     run_id: str
     project_root: str
-    pytest_version: str
+    tool: Dict[str, Any] = field(default_factory=dict)
     collected: List[CollectedTest] = field(default_factory=list)
     outcomes: List[TestOutcome] = field(default_factory=list)
 
@@ -40,7 +40,7 @@ class RunManifest:
             "framework": self.framework,
             "run_id": self.run_id,
             "project_root": self.project_root,
-            "pytest_version": self.pytest_version,
+            "tool": dict(self.tool),
             "collected": [item.to_dict() for item in self.collected],
             "outcomes": [item.to_dict() for item in self.outcomes],
         }
@@ -113,16 +113,22 @@ class PredictionRecord:
     class_name: Optional[str]
     test_name: Optional[str]
     file_path: Optional[str]
+    line: Optional[int] = None
+    explanation: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "test_id": self.test_id,
             "score": self.score,
             "predicted_label": self.predicted_label,
             "class_name": self.class_name,
             "test_name": self.test_name,
             "file_path": self.file_path,
+            "line": self.line,
         }
+        if self.explanation is not None:
+            payload["explanation"] = dict(self.explanation)
+        return payload
 
 
 @dataclass(frozen=True)

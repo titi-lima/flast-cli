@@ -1,7 +1,8 @@
 # Flast Assistant for VS Code
 
-Flast Assistant surfaces FLAST flaky-test predictions as VS Code diagnostics for
-pytest projects.
+Flast Assistant surfaces FLAST flaky-test predictions as VS Code diagnostics.
+It defaults to the `pytest` provider, and the extension host is framework-neutral
+so additional providers can plug into the same command flow.
 
 ## Usage
 
@@ -18,7 +19,16 @@ prediction, so refresh is manual by default.
 
 - `flast.executablePath`: command or path used to invoke Flast.
 - `flast.projectDir`: project root. Defaults to the first workspace folder.
-- `flast.pytestArgs`: arguments forwarded to pytest.
+- `flast.framework`: framework provider used by FLAST commands.
+- `flast.frameworkArgs`: arguments forwarded to the selected framework provider.
+- `flast.languageIds`: VS Code language IDs that can trigger on-save refreshes.
 - `flast.refreshMode`: `manual` or `onSave`.
 - `flast.warningThreshold`: minimum score for warning diagnostics.
 - `flast.diagnosticSeverity`: `warning` or `information`.
+
+For Vitest projects, set `flast.framework` to `vitest` and include JavaScript or
+TypeScript language IDs in `flast.languageIds`, for example `javascript`,
+`typescript`, `javascriptreact`, or `typescriptreact`.
+
+For JUnit projects, set `flast.framework` to `junit`; the default language IDs
+already include `java`.

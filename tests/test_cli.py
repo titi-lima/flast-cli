@@ -115,7 +115,7 @@ def test_init_observe_train_predict_and_report(tmp_path: Path) -> None:
         "pytest",
         "--format",
         "json",
-        "--pytest-arg",
+        "--framework-arg",
         "tests",
     )
     assert result.returncode == 0, result.stderr
@@ -129,6 +129,11 @@ def test_init_observe_train_predict_and_report(tmp_path: Path) -> None:
     assert flaky["test_name"] == "test_flaky_toggle"
     assert flaky["line"] == 12
     assert "score" in flaky["message"]
+    assert "explanation" in flaky
+    assert flaky["explanation"]["summary"]
+    assert flaky["explanation"]["nearest_examples"]
+    assert "static_signals" in flaky["explanation"]
+    assert flaky["explanation"]["observed_history"]["label"] == "flaky"
 
 
 def test_observe_reuse_history_merges_imported_manifest(tmp_path: Path) -> None:

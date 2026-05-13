@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .schemas import FeatureInput
 
@@ -104,3 +104,81 @@ def build_feature_text(feature: FeatureInput) -> str:
     parts.append("source:")
     parts.append(feature.source_text)
     return "\n".join(parts)
+
+
+def detect_static_signals(feature: FeatureInput) -> List[Dict[str, str]]:
+    """Return lightweight source clues commonly associated with flaky tests."""
+    source = feature.source_text
+    lowered = source.lower()
+    signals: List[Dict[str, str]] = []
+
+    def add(kind: str, detail: str) -> None:
+        if not any(item["kind"] == kind for item in signals):
+            signals.append({"kind": kind, "detail": detail})
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tree = None
+
+    imported_names = set()
+    called_names = set()
+    assigned_env = False
+
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    imported_names.add(root)
+            elif isinstance(node, ast.Call):
+                name = _call_name(node.func)
+                if name:
+                    called_names.add(name)
+            elif isinstance(node, ast.Subscript):
+                target = _call_name(node.value)
+                if target in {"os.environ", "environ"}:
+                    assigned_env = True
+
+    all_names = imported_names | called_names
+    if {"random", "secrets", "uuid"} & all_names or "random." in lowered:
+        add("randomness", "uses random, secrets, or UUID generation")
+    if {"time", "datetime", "freezegun"} & all_names or "datetime." in lowered:
+        add("time", "uses wall-clock or date/time APIs")
+    if "sleep" in {name.rsplit(".", 1)[-1] for name in called_names} or "sleep(" in lowered:
+        add("timing", "uses sleeps or timing-sensitive waits")
+    if (
+        {"pathlib", "tempfile", "shutil"} & all_names
+        or "Path" in called_names
+        or any(name.startswith(("Path.", "open", "os.path", "shutil.", "tempfile.")) for name in called_names)
+        or "path(" in lowered
+    ):
+        add("filesystem state", "uses filesystem or shared local state")
+    if assigned_env or "os.environ" in source or "monkeypatch.setenv" in source:
+        add("environment mutation", "reads or mutates process environment")
+    if (
+        {"requests", "httpx", "socket", "urllib"} & all_names
+        or any(name.startswith(("requests.", "httpx.", "socket.")) for name in called_names)
+    ):
+        add("network", "uses network-facing APIs")
+    if {"subprocess", "multiprocessing"} & all_names or any(
+        name.startswith(("subprocess.", "multiprocessing.")) for name in called_names
+    ):
+        add("subprocess", "starts subprocesses or external commands")
+    if {"threading", "asyncio", "concurrent"} & all_names or any(
+        name.startswith(("threading.", "asyncio.", "concurrent.")) for name in called_names
+    ):
+        add("concurrency", "uses threads, async, or concurrent execution")
+    if feature.test_id != feature.normalized_test_id or "parametrize" in lowered:
+        add("parametrization", "pytest parametrization can hide case-specific behavior")
+
+    return signals
+
+
+def _call_name(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _call_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return None

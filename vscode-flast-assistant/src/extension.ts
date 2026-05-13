@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 
 type RefreshMode = 'manual' | 'onSave';
 type SeveritySetting = 'warning' | 'information';
+const DEFAULT_LANGUAGE_IDS = ['python', 'javascript', 'typescript', 'javascriptreact', 'typescriptreact', 'java'];
 
 interface FlastDiagnosticRecord {
   test_id: string;
@@ -15,6 +16,28 @@ interface FlastDiagnosticRecord {
   file_path?: string | null;
   line?: number | null;
   message: string;
+  explanation?: {
+    summary?: string;
+    observed_history?: {
+      label: string;
+      reason: string;
+      total_observations: number;
+      outcome_counts: Record<string, number>;
+    } | null;
+    nearest_examples?: Array<{
+      test_id: string;
+      label: string;
+      distance: number;
+      score_contribution: number;
+      reason: string;
+      total_observations: number;
+      outcome_counts: Record<string, number>;
+    }>;
+    static_signals?: Array<{
+      kind: string;
+      detail: string;
+    }>;
+  };
 }
 
 interface FlastDiagnosticsPayload {
@@ -24,7 +47,9 @@ interface FlastDiagnosticsPayload {
 interface FlastConfig {
   executablePath: string;
   projectDir: string;
-  pytestArgs: string[];
+  framework: string;
+  frameworkArgs: string[];
+  languageIds: string[];
   refreshMode: RefreshMode;
   warningThreshold: number;
   diagnosticSeverity: SeveritySetting;
@@ -41,13 +66,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(diagnosticsCollection, output);
   context.subscriptions.push(
-    vscode.commands.registerCommand('flast.initializeWorkspace', () => runSimpleCommand(['init', 'pytest'], 'Initialize FLAST workspace')),
+    vscode.commands.registerCommand('flast.initializeWorkspace', initializeWorkspace),
     vscode.commands.registerCommand('flast.observeTestRuns', observeTestRuns),
     vscode.commands.registerCommand('flast.trainModel', () => runSimpleCommand(['train'], 'Train FLAST model')),
     vscode.commands.registerCommand('flast.refreshDiagnostics', () => refreshDiagnostics()),
     vscode.commands.registerCommand('flast.openLatestReport', openLatestReport),
     vscode.workspace.onDidSaveTextDocument((document) => {
-      if (document.languageId === 'python' && readConfig().refreshMode === 'onSave') {
+      const config = readConfig();
+      if (config.languageIds.includes(document.languageId) && config.refreshMode === 'onSave') {
         scheduleRefresh();
       }
     }),
@@ -67,10 +93,13 @@ export function deactivate(): void {
 
 function readConfig(): FlastConfig {
   const config = vscode.workspace.getConfiguration('flast');
+  const frameworkArgs = config.get<string[]>('frameworkArgs');
   return {
     executablePath: config.get<string>('executablePath', 'flast'),
     projectDir: resolveProjectDir(config.get<string>('projectDir', '')),
-    pytestArgs: config.get<string[]>('pytestArgs', []),
+    framework: config.get<string>('framework', 'pytest'),
+    frameworkArgs: frameworkArgs ?? config.get<string[]>('pytestArgs', []),
+    languageIds: config.get<string[]>('languageIds', DEFAULT_LANGUAGE_IDS),
     refreshMode: config.get<RefreshMode>('refreshMode', 'manual'),
     warningThreshold: config.get<number>('warningThreshold', 0.5),
     diagnosticSeverity: config.get<SeveritySetting>('diagnosticSeverity', 'warning')
@@ -102,10 +131,16 @@ function scheduleRefresh(): void {
   }, 1000);
 }
 
+async function initializeWorkspace(): Promise<void> {
+  const config = readConfig();
+  await runSimpleCommand(['init', config.framework], 'Initialize FLAST workspace');
+}
+
 async function observeTestRuns(): Promise<void> {
+  const config = readConfig();
   const runs = await vscode.window.showInputBox({
     title: 'Flast: Observe Test Runs',
-    prompt: 'Number of repeated pytest runs to observe',
+    prompt: `Number of repeated ${config.framework} runs to observe`,
     value: '10',
     validateInput: (value) => {
       const parsed = Number(value);
@@ -115,7 +150,7 @@ async function observeTestRuns(): Promise<void> {
   if (!runs) {
     return;
   }
-  await runSimpleCommand(['observe', 'pytest', '--runs', runs], 'Observe FLAST test runs', true);
+  await runSimpleCommand(['observe', config.framework, '--runs', runs], 'Observe FLAST test runs', true);
 }
 
 async function runSimpleCommand(baseArgs: string[], title: string, includePytestArgs = false): Promise<void> {
@@ -124,7 +159,7 @@ async function runSimpleCommand(baseArgs: string[], title: string, includePytest
     ...baseArgs,
     '--project-dir',
     config.projectDir,
-    ...(includePytestArgs ? pytestArgs(config.pytestArgs) : [])
+    ...(includePytestArgs ? frameworkArgs(config.frameworkArgs) : [])
   ];
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title, cancellable: true },
@@ -139,12 +174,12 @@ async function refreshDiagnostics(): Promise<void> {
   const config = readConfig();
   const args = [
     'diagnostics',
-    'pytest',
+    config.framework,
     '--format',
     'json',
     '--project-dir',
     config.projectDir,
-    ...pytestArgs(config.pytestArgs)
+    ...frameworkArgs(config.frameworkArgs)
   ];
 
   await vscode.window.withProgress(
@@ -157,8 +192,8 @@ async function refreshDiagnostics(): Promise<void> {
   );
 }
 
-function pytestArgs(args: string[]): string[] {
-  return args.flatMap((arg) => ['--pytest-arg', arg]);
+function frameworkArgs(args: string[]): string[] {
+  return args.flatMap((arg) => ['--framework-arg', arg]);
 }
 
 function runFlast(

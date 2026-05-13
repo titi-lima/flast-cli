@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import ast
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from .schemas import PredictionRecord, PredictionReport
 
@@ -20,9 +18,10 @@ class DiagnosticRecord:
     file_path: Optional[str]
     line: Optional[int]
     message: str
+    explanation: Optional[Dict[str, Any]]
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "test_id": self.test_id,
             "score": self.score,
             "predicted_label": self.predicted_label,
@@ -32,56 +31,25 @@ class DiagnosticRecord:
             "line": self.line,
             "message": self.message,
         }
-
-
-def _find_class(tree: ast.Module, class_name: str) -> Optional[ast.ClassDef]:
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return node
-    return None
-
-
-def _find_function(nodes: List[ast.stmt], test_name: str) -> Optional[ast.AST]:
-    for node in nodes:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == test_name:
-            return node
-    return None
-
-
-def resolve_prediction_line(prediction: PredictionRecord) -> Optional[int]:
-    if not prediction.file_path or not prediction.test_name:
-        return None
-
-    file_path = Path(prediction.file_path)
-    if not file_path.exists():
-        return None
-
-    try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, UnicodeDecodeError):
-        return None
-
-    target_node: Optional[ast.AST] = None
-    if prediction.class_name:
-        class_node = _find_class(tree, prediction.class_name)
-        if class_node is not None:
-            target_node = _find_function(class_node.body, prediction.test_name)
-    else:
-        target_node = _find_function(tree.body, prediction.test_name)
-
-    line = getattr(target_node, "lineno", None)
-    return int(line) if line is not None else None
+        if self.explanation is not None:
+            payload["explanation"] = dict(self.explanation)
+        return payload
 
 
 def diagnostic_message(prediction: PredictionRecord) -> str:
-    return (
+    prefix = (
         "FLAST predicts {label} risk for {test_id} "
-        "(score {score:.3f})."
+        "(score {score:.3f})"
     ).format(
         label=prediction.predicted_label.replace("_", " "),
         test_id=prediction.test_id,
         score=prediction.score,
     )
+    explanation = prediction.explanation or {}
+    summary = explanation.get("summary")
+    if summary:
+        return f"{prefix}: {summary}."
+    return f"{prefix}."
 
 
 def build_diagnostics(report: PredictionReport) -> Dict[str, Any]:
@@ -93,8 +61,9 @@ def build_diagnostics(report: PredictionReport) -> Dict[str, Any]:
             class_name=prediction.class_name,
             test_name=prediction.test_name,
             file_path=prediction.file_path,
-            line=resolve_prediction_line(prediction),
+            line=prediction.line,
             message=diagnostic_message(prediction),
+            explanation=prediction.explanation,
         ).to_dict()
         for prediction in report.predictions
     ]
