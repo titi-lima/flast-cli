@@ -6,10 +6,12 @@ from typing import Dict, Iterable
 
 from .base import FrameworkAdapter
 from .pytest_adapter import PytestAdapter
+from .vitest_adapter import VitestAdapter
 
 
 _ADAPTERS: Dict[str, FrameworkAdapter] = {
     PytestAdapter.framework: PytestAdapter(),
+    VitestAdapter.framework: VitestAdapter(),
 }
 
 
