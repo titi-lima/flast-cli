@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import Dict, Iterable
 
 from .base import FrameworkAdapter
+from .junit_adapter import JUnitAdapter
 from .pytest_adapter import PytestAdapter
 from .vitest_adapter import VitestAdapter
 
 
 _ADAPTERS: Dict[str, FrameworkAdapter] = {
+    JUnitAdapter.framework: JUnitAdapter(),
     PytestAdapter.framework: PytestAdapter(),
     VitestAdapter.framework: VitestAdapter(),
 }
