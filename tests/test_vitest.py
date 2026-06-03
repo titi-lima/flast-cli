@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from flast_cli.adapters import VitestAdapter, supported_frameworks
+from flast_cli.features import detect_static_signals
 from flast_cli.integrations.vitest.runner import (
     manifest_records_from_json,
     parse_vitest_list_output,
@@ -88,6 +89,34 @@ describe('math helpers', () => {
         prediction=_prediction("tests/sample.test.ts::math helpers::adds numbers", test_file),
         project_root=tmp_path,
     ) == 4
+
+
+def test_vitest_static_signal_detection_uses_js_ts_vocabulary(tmp_path: Path) -> None:
+    test_file = tmp_path / "tests" / "flaky.test.ts"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        """
+import { test, vi } from 'vitest';
+import { writeFileSync } from 'node:fs';
+
+test('uses async shared state', async () => {
+  vi.mock('../clock');
+  process.env.TOKEN = String(Date.now() + Math.random());
+  writeFileSync('state.txt', process.env.TOKEN);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+});
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    feature = VitestAdapter().resolve_feature_input(
+        "tests/flaky.test.ts::uses async shared state",
+        tmp_path,
+    )
+    kinds = {item["kind"] for item in detect_static_signals(feature)}
+
+    assert {"randomness", "time", "timing", "filesystem state", "environment mutation", "mock state"}.issubset(kinds)
 
 
 def _prediction(test_id: str, test_file: Path):

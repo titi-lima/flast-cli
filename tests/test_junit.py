@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from flast_cli.adapters import JUnitAdapter, supported_frameworks
+from flast_cli.features import detect_static_signals
 from flast_cli.integrations.junit.runner import (
     discover_junit_tests,
     extract_test_methods,
@@ -104,3 +105,39 @@ def test_junit_feature_and_line_resolution(tmp_path: Path) -> None:
         ),
         tmp_path,
     ) == 7
+
+
+def test_junit_static_signal_detection_uses_java_vocabulary(tmp_path: Path) -> None:
+    test_file = tmp_path / "src" / "test" / "java" / "com" / "example" / "FlakyTest.java"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        """
+package com.example;
+
+import org.junit.jupiter.api.Test;
+import java.nio.file.Files;
+import java.time.Instant;
+import java.util.UUID;
+
+class FlakyTest {
+    static String shared;
+
+    @Test
+    void readsClockAndFile() throws Exception {
+        shared = UUID.randomUUID().toString() + Instant.now();
+        Files.writeString(java.nio.file.Path.of("state.txt"), shared);
+        Thread.sleep(10);
+    }
+}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    feature = JUnitAdapter().resolve_feature_input(
+        "src/test/java/com/example/FlakyTest.java::com.example.FlakyTest::readsClockAndFile",
+        tmp_path,
+    )
+    kinds = {item["kind"] for item in detect_static_signals(feature)}
+
+    assert {"randomness", "time", "timing", "filesystem state"}.issubset(kinds)

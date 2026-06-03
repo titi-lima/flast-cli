@@ -3,10 +3,114 @@
 from __future__ import annotations
 
 import ast
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .schemas import FeatureInput
+
+
+@dataclass(frozen=True)
+class SignalRule:
+    kind: str
+    detail: str
+    tokens: Tuple[str, ...] = ()
+    fragments: Tuple[str, ...] = ()
+
+
+LANGUAGE_EXTENSIONS = {
+    "python": {".py"},
+    "java": {".java"},
+    "javascript": {".js", ".jsx", ".mjs", ".cjs"},
+    "typescript": {".ts", ".tsx", ".mts", ".cts"},
+}
+
+
+COMMON_SIGNAL_RULES: Tuple[SignalRule, ...] = (
+    SignalRule(
+        "randomness",
+        "uses random, crypto, or UUID generation",
+        tokens=("random", "secrets", "uuid", "crypto", "math.random", "randomuuid", "secureRandom"),
+        fragments=("Math.random", "randomUUID", "SecureRandom"),
+    ),
+    SignalRule(
+        "time",
+        "uses wall-clock or date/time APIs",
+        tokens=("time", "datetime", "date", "instant", "clock", "localdate", "localdatetime"),
+        fragments=("Date.now", "new Date", "System.currentTimeMillis", "Instant.now", "LocalDate"),
+    ),
+    SignalRule(
+        "timing",
+        "uses sleeps, timers, or timing-sensitive waits",
+        tokens=("sleep", "settimeout", "setinterval", "waitfor", "awaitility"),
+        fragments=("time.sleep", "Thread.sleep", "setTimeout", "setInterval", "waitFor"),
+    ),
+    SignalRule(
+        "filesystem state",
+        "uses filesystem or shared local state",
+        tokens=("path", "pathlib", "tempfile", "shutil", "fs", "file", "files", "paths"),
+        fragments=("Path(", "Files.", "Paths.", "fs.", "readFile", "writeFile"),
+    ),
+    SignalRule(
+        "environment mutation",
+        "reads or mutates process environment",
+        tokens=("environ", "env", "getenv", "setproperty", "clearproperty"),
+        fragments=("os.environ", "process.env", "System.getenv", "System.setProperty"),
+    ),
+    SignalRule(
+        "network",
+        "uses network-facing APIs",
+        tokens=("requests", "httpx", "socket", "urllib", "fetch", "axios", "http", "https", "okhttp"),
+        fragments=("fetch(", "axios.", "requests.", "httpx.", "new URL", "HttpClient"),
+    ),
+    SignalRule(
+        "subprocess",
+        "starts subprocesses or external commands",
+        tokens=("subprocess", "multiprocessing", "child_process", "exec", "spawn", "processbuilder"),
+        fragments=("subprocess.", "child_process", "ProcessBuilder", "Runtime.getRuntime"),
+    ),
+    SignalRule(
+        "concurrency",
+        "uses threads, async, or concurrent execution",
+        tokens=("threading", "asyncio", "concurrent", "promise", "worker", "thread", "executor"),
+        fragments=("Promise.", "Promise<", "CompletableFuture", "ExecutorService", "new Thread"),
+    ),
+)
+
+
+LANGUAGE_SIGNAL_RULES = {
+    "python": (
+        SignalRule(
+            "parametrization",
+            "pytest parametrization can hide case-specific behavior",
+            fragments=("parametrize",),
+        ),
+    ),
+    "java": (
+        SignalRule(
+            "order dependence",
+            "uses static or lifecycle state that can leak between tests",
+            fragments=("static ", "@BeforeAll", "@AfterAll", "TestInstance"),
+        ),
+    ),
+    "javascript": (
+        SignalRule(
+            "mock state",
+            "uses test doubles or module mocks that may leak between cases",
+            tokens=("vi", "jest", "mock", "spyon"),
+            fragments=("vi.mock", "jest.mock", "spyOn"),
+        ),
+    ),
+    "typescript": (
+        SignalRule(
+            "mock state",
+            "uses test doubles or module mocks that may leak between cases",
+            tokens=("vi", "jest", "mock", "spyon"),
+            fragments=("vi.mock", "jest.mock", "spyOn"),
+        ),
+    ),
+}
 
 
 def strip_pytest_param_suffix(name: str) -> str:
@@ -109,69 +213,103 @@ def build_feature_text(feature: FeatureInput) -> str:
 def detect_static_signals(feature: FeatureInput) -> List[Dict[str, str]]:
     """Return lightweight source clues commonly associated with flaky tests."""
     source = feature.source_text
-    lowered = source.lower()
     signals: List[Dict[str, str]] = []
 
     def add(kind: str, detail: str) -> None:
         if not any(item["kind"] == kind for item in signals):
             signals.append({"kind": kind, "detail": detail})
 
+    language = _feature_language(feature)
+    tokens = _source_tokens(source)
+    for rule in (*COMMON_SIGNAL_RULES, *LANGUAGE_SIGNAL_RULES.get(language, ())):
+        if _matches_rule(rule, source, tokens):
+            add(rule.kind, rule.detail)
+
+    if language == "python":
+        for kind, detail in _detect_python_ast_signals(source):
+            add(kind, detail)
+
+    if feature.test_id != feature.normalized_test_id:
+        add("parametrization", "pytest parametrization can hide case-specific behavior")
+
+    return signals
+
+
+def _feature_language(feature: FeatureInput) -> str:
+    path_hint = feature.file_path or Path(feature.normalized_test_id.split("::", 1)[0])
+    suffix = path_hint.suffix
+    for language, extensions in LANGUAGE_EXTENSIONS.items():
+        if suffix in extensions:
+            return language
+    return "unknown"
+
+
+def _source_tokens(source: str) -> Set[str]:
+    tokens = {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_$.]*", source)}
+    for token in list(tokens):
+        tokens.update(part for part in token.split(".") if part)
+    return tokens
+
+
+def _matches_rule(rule: SignalRule, source: str, tokens: Set[str]) -> bool:
+    lowered = source.lower()
+    return any(token.lower() in tokens for token in rule.tokens) or any(
+        fragment.lower() in lowered for fragment in rule.fragments
+    )
+
+
+def _detect_python_ast_signals(source: str) -> Iterable[Tuple[str, str]]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        tree = None
+        return []
 
     imported_names = set()
     called_names = set()
     assigned_env = False
 
-    if tree is not None:
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for alias in node.names:
-                    root = alias.name.split(".")[0]
-                    imported_names.add(root)
-            elif isinstance(node, ast.Call):
-                name = _call_name(node.func)
-                if name:
-                    called_names.add(name)
-            elif isinstance(node, ast.Subscript):
-                target = _call_name(node.value)
-                if target in {"os.environ", "environ"}:
-                    assigned_env = True
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                imported_names.add(root)
+        elif isinstance(node, ast.Call):
+            name = _call_name(node.func)
+            if name:
+                called_names.add(name)
+        elif isinstance(node, ast.Subscript):
+            target = _call_name(node.value)
+            if target in {"os.environ", "environ"}:
+                assigned_env = True
 
+    signals = []
     all_names = imported_names | called_names
-    if {"random", "secrets", "uuid"} & all_names or "random." in lowered:
-        add("randomness", "uses random, secrets, or UUID generation")
-    if {"time", "datetime", "freezegun"} & all_names or "datetime." in lowered:
-        add("time", "uses wall-clock or date/time APIs")
-    if "sleep" in {name.rsplit(".", 1)[-1] for name in called_names} or "sleep(" in lowered:
-        add("timing", "uses sleeps or timing-sensitive waits")
+    if {"random", "secrets", "uuid"} & all_names:
+        signals.append(("randomness", "uses random, crypto, or UUID generation"))
+    if {"time", "datetime", "freezegun"} & all_names:
+        signals.append(("time", "uses wall-clock or date/time APIs"))
+    if "sleep" in {name.rsplit(".", 1)[-1] for name in called_names}:
+        signals.append(("timing", "uses sleeps, timers, or timing-sensitive waits"))
     if (
         {"pathlib", "tempfile", "shutil"} & all_names
         or "Path" in called_names
         or any(name.startswith(("Path.", "open", "os.path", "shutil.", "tempfile.")) for name in called_names)
-        or "path(" in lowered
     ):
-        add("filesystem state", "uses filesystem or shared local state")
-    if assigned_env or "os.environ" in source or "monkeypatch.setenv" in source:
-        add("environment mutation", "reads or mutates process environment")
-    if (
-        {"requests", "httpx", "socket", "urllib"} & all_names
-        or any(name.startswith(("requests.", "httpx.", "socket.")) for name in called_names)
+        signals.append(("filesystem state", "uses filesystem or shared local state"))
+    if assigned_env:
+        signals.append(("environment mutation", "reads or mutates process environment"))
+    if {"requests", "httpx", "socket", "urllib"} & all_names or any(
+        name.startswith(("requests.", "httpx.", "socket.")) for name in called_names
     ):
-        add("network", "uses network-facing APIs")
+        signals.append(("network", "uses network-facing APIs"))
     if {"subprocess", "multiprocessing"} & all_names or any(
         name.startswith(("subprocess.", "multiprocessing.")) for name in called_names
     ):
-        add("subprocess", "starts subprocesses or external commands")
+        signals.append(("subprocess", "starts subprocesses or external commands"))
     if {"threading", "asyncio", "concurrent"} & all_names or any(
         name.startswith(("threading.", "asyncio.", "concurrent.")) for name in called_names
     ):
-        add("concurrency", "uses threads, async, or concurrent execution")
-    if feature.test_id != feature.normalized_test_id or "parametrize" in lowered:
-        add("parametrization", "pytest parametrization can hide case-specific behavior")
-
+        signals.append(("concurrency", "uses threads, async, or concurrent execution"))
     return signals
 
 
