@@ -17,6 +17,9 @@ describe("demo suite", () => {
   test("flaky toggle", () => {
     expect(nextRunCount() % 2).toBe(0);
   });
+  test("another toggle", () => {
+    expect(nextRunCount() % 2).toBe(0);
+  });
 
   test("stable pass", () => {
     expect(1 + 1).toBe(2);

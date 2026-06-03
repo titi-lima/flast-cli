@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import uuid
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from .adapters import FrameworkAdapter, get_adapter, supported_frameworks
-from .constants import DEFAULT_MIN_OBSERVATIONS, DEFAULT_RUNS, SCHEMA_VERSION
+from .constants import (
+    DEFAULT_ALGORITHM,
+    DEFAULT_EPS,
+    DEFAULT_K,
+    DEFAULT_METRIC,
+    DEFAULT_MIN_OBSERVATIONS,
+    DEFAULT_RUNS,
+    DEFAULT_SIGMA,
+    DEFAULT_WEIGHTS,
+    SCHEMA_VERSION,
+)
 from .corpus import iter_manifest_sources, rebuild_corpus
 from .diagnostics import build_diagnostics
 from .features import build_feature_text, detect_static_signals
@@ -142,6 +153,29 @@ def create_parser() -> argparse.ArgumentParser:
         diagnostics_framework.add_argument("--output", help="Optional output path for rendered diagnostics")
         _add_framework_args(diagnostics_framework, framework)
 
+    auto_parser = sub.add_parser(
+        "auto",
+        help="Refresh corpus, retrain if possible, and emit diagnostics",
+    )
+    auto_sub = auto_parser.add_subparsers(dest="framework", required=True)
+    for framework in supported_frameworks():
+        auto_framework = auto_sub.add_parser(framework, help=f"Auto-refresh {framework} diagnostics")
+        auto_framework.add_argument("--project-dir", default=".", help="Path to project root")
+        auto_framework.add_argument(
+            "--format",
+            choices=["json"],
+            default="json",
+            help="Output format",
+        )
+        auto_framework.add_argument("--output", help="Optional output path for rendered diagnostics")
+        auto_framework.add_argument(
+            "--min-observations",
+            type=int,
+            default=None,
+            help=f"Minimum observations required for non_flaky labels (default: {DEFAULT_MIN_OBSERVATIONS})",
+        )
+        _add_framework_args(auto_framework, framework)
+
     report_parser = sub.add_parser("report", help="Render an existing report")
     report_parser.add_argument("--project-dir", default=".", help="Path to project root")
     report_parser.add_argument(
@@ -224,8 +258,103 @@ def run_init(args: argparse.Namespace) -> int:
     project_root = _project_root(args.project_dir)
     paths = ensure_workspace(project_root)
     print(f"Initialized FLAST workspace at {paths.workspace_dir}")
-    print(f"{args.framework} integration is wrapper-driven; no framework config changes were made.")
+    if args.framework == "pytest":
+        print("Pytest integration is active: regular pytest runs now add FLAST observations automatically.")
+    elif args.framework == "vitest":
+        changed = _init_vitest_autocapture(project_root)
+        if changed:
+            print("Vitest integration is active: package scripts now load the FLAST reporter automatically.")
+        else:
+            print("Vitest reporter is installed; add `.flast/tools/vitest/flast-reporter.cjs` to your Vitest reporters.")
+    elif args.framework == "junit":
+        _init_junit_autocapture(project_root)
+        print("JUnit integration is active: a JUnit Platform listener was installed for normal test runs.")
+    else:
+        print(f"{args.framework} integration is wrapper-driven; use `flast observe {args.framework}` to add observations.")
     return 0
+
+
+def _init_vitest_autocapture(project_root: Path) -> bool:
+    reporter_source = Path(__file__).resolve().parent / "integrations" / "vitest" / "flast-reporter.cjs"
+    reporter_target = project_root / ".flast" / "tools" / "vitest" / "flast-reporter.cjs"
+    reporter_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(reporter_source, reporter_target)
+
+    package_json = project_root / "package.json"
+    if not package_json.exists():
+        return False
+
+    package = json.loads(package_json.read_text(encoding="utf-8"))
+    scripts = package.setdefault("scripts", {})
+    test_script = str(scripts.get("test", "vitest run"))
+    if "vitest" not in test_script:
+        return False
+    reporter_arg = "--reporter=.flast/tools/vitest/flast-reporter.cjs"
+    if reporter_arg not in test_script:
+        scripts["test"] = f"{test_script} --reporter=default {reporter_arg}"
+        package_json.write_text(json.dumps(package, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return True
+
+
+def _init_junit_autocapture(project_root: Path) -> None:
+    listener_source = Path(__file__).resolve().parent / "integrations" / "junit" / "FlastJUnitListener.java"
+    listener_target = project_root / "src" / "test" / "java" / "flast" / "FlastJUnitListener.java"
+    service_target = (
+        project_root
+        / "src"
+        / "test"
+        / "resources"
+        / "META-INF"
+        / "services"
+        / "org.junit.platform.launcher.TestExecutionListener"
+    )
+    listener_target.parent.mkdir(parents=True, exist_ok=True)
+    service_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(listener_source, listener_target)
+    service_target.write_text("flast.FlastJUnitListener\n", encoding="utf-8")
+
+
+def _rebuild_workspace_corpus(project_root: Path, min_observations: int) -> tuple[int, int, dict]:
+    manifests = _load_workspace_manifests(project_root)
+    observations, labels = rebuild_corpus(
+        project_root=project_root,
+        manifests=manifests,
+        min_observations=min_observations,
+    )
+    counts = {"flaky": 0, "non_flaky": 0, "unlabeled": 0}
+    for label in labels:
+        counts[label.label] = counts.get(label.label, 0) + 1
+    return len(observations), len(labels), counts
+
+
+def _train_from_workspace(project_root: Path) -> Optional[dict]:
+    labels = load_labels(ensure_workspace(project_root).labels_path)
+    trainable = [label for label in labels if label.label in {"flaky", "non_flaky"}]
+    trainable_labels = {label.label for label in trainable}
+    if trainable_labels != {"flaky", "non_flaky"}:
+        return None
+
+    feature_texts = []
+    for label in labels:
+        adapter = _adapter_for(label.framework)
+        feature = adapter.resolve_feature_input(label.test_id, Path(label.project_root))
+        feature_texts.append(build_feature_text(feature))
+
+    config = load_config(project_root)
+    model_config = config.get("model", {})
+    return train_model(
+        project_root=project_root,
+        labels=labels,
+        feature_texts=feature_texts,
+        params=TrainingParams(
+            k=int(model_config.get("k", DEFAULT_K)),
+            sigma=float(model_config.get("sigma", DEFAULT_SIGMA)),
+            eps=float(model_config.get("eps", DEFAULT_EPS)),
+            metric=str(model_config.get("metric", DEFAULT_METRIC)),
+            weights=str(model_config.get("weights", DEFAULT_WEIGHTS)),
+            algorithm=str(model_config.get("algorithm", DEFAULT_ALGORITHM)),
+        ),
+    )
 
 
 def run_observe(args: argparse.Namespace) -> int:
@@ -264,20 +393,12 @@ def run_observe(args: argparse.Namespace) -> int:
             DEFAULT_MIN_OBSERVATIONS,
         )
     )
-    manifests = _load_workspace_manifests(project_root)
-    observations, labels = rebuild_corpus(
-        project_root=project_root,
-        manifests=manifests,
-        min_observations=min_observations,
-    )
-    counts = {"flaky": 0, "non_flaky": 0, "unlabeled": 0}
-    for label in labels:
-        counts[label.label] = counts.get(label.label, 0) + 1
+    observation_count, _, counts = _rebuild_workspace_corpus(project_root, min_observations)
     print(
         "Observed {runs} run(s); corpus now tracks {tests} test(s) "
         "({flaky} flaky, {non_flaky} non_flaky, {unlabeled} unlabeled).".format(
             runs=run_count,
-            tests=len(observations),
+            tests=observation_count,
             flaky=counts.get("flaky", 0),
             non_flaky=counts.get("non_flaky", 0),
             unlabeled=counts.get("unlabeled", 0),
@@ -490,6 +611,35 @@ def run_diagnostics(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_auto(args: argparse.Namespace) -> int:
+    project_root = _project_root(args.project_dir)
+    ensure_workspace(project_root)
+    min_observations = (
+        args.min_observations
+        if args.min_observations is not None
+        else _default_from_config(project_root, "observe", "min_observations", DEFAULT_MIN_OBSERVATIONS)
+    )
+    _rebuild_workspace_corpus(project_root, min_observations)
+    metadata = _train_from_workspace(project_root)
+    if metadata is None:
+        rendered = json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "run_id": None,
+                "framework": args.framework,
+                "project_root": str(project_root),
+                "diagnostics": [],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        print(rendered)
+        if args.output:
+            write_optional_output(Path(args.output).expanduser().resolve(), rendered)
+        return 0
+    return run_diagnostics(args)
+
+
 def run_report(args: argparse.Namespace) -> int:
     project_root = _project_root(args.project_dir)
     ensure_workspace(project_root)
@@ -517,6 +667,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_predict(args)
         if args.command == "diagnostics":
             return run_diagnostics(args)
+        if args.command == "auto":
+            return run_auto(args)
         if args.command == "report":
             return run_report(args)
     except Exception as exc:

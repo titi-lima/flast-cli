@@ -177,6 +177,48 @@ def test_observe_reuse_history_merges_imported_manifest(tmp_path: Path) -> None:
     assert labels_by_test["tests/test_sample.py::test_flaky_toggle"] == "flaky"
 
 
+def test_init_vitest_installs_reporter_and_patches_test_script(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest run"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli(project_dir, "init", "vitest")
+    assert result.returncode == 0, result.stderr
+    assert (project_dir / ".flast" / "tools" / "vitest" / "flast-reporter.cjs").exists()
+    package = json.loads((project_dir / "package.json").read_text(encoding="utf-8"))
+    assert "--reporter=.flast/tools/vitest/flast-reporter.cjs" in package["scripts"]["test"]
+
+    second = _run_cli(project_dir, "init", "vitest")
+    assert second.returncode == 0, second.stderr
+    package = json.loads((project_dir / "package.json").read_text(encoding="utf-8"))
+    assert package["scripts"]["test"].count("flast-reporter.cjs") == 1
+
+
+def test_init_junit_installs_platform_listener(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    result = _run_cli(project_dir, "init", "junit")
+    assert result.returncode == 0, result.stderr
+
+    listener = project_dir / "src" / "test" / "java" / "flast" / "FlastJUnitListener.java"
+    service = (
+        project_dir
+        / "src"
+        / "test"
+        / "resources"
+        / "META-INF"
+        / "services"
+        / "org.junit.platform.launcher.TestExecutionListener"
+    )
+    assert listener.exists()
+    assert "class FlastJUnitListener" in listener.read_text(encoding="utf-8")
+    assert service.read_text(encoding="utf-8") == "flast.FlastJUnitListener\n"
+
+
 def test_predict_without_model_fails_cleanly(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     _create_project(project_dir)
@@ -186,6 +228,43 @@ def test_predict_without_model_fails_cleanly(tmp_path: Path) -> None:
     result = _run_cli(project_dir, "predict", "pytest", "--pytest-arg", "tests")
     assert result.returncode != 0
     assert "Missing trained model artifacts" in result.stderr
+
+
+def test_auto_before_history_returns_empty_diagnostics(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    _create_project(project_dir)
+    result = _run_cli(project_dir, "init", "pytest")
+    assert result.returncode == 0, result.stderr
+
+    result = _run_cli(project_dir, "auto", "pytest", "--framework-arg", "tests")
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["framework"] == "pytest"
+    assert payload["diagnostics"] == []
+
+
+def test_auto_rebuilds_trains_and_emits_diagnostics_from_accumulated_runs(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    _create_project(project_dir)
+    result = _run_cli(project_dir, "init", "pytest")
+    assert result.returncode == 0, result.stderr
+
+    for _ in range(3):
+        run = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests"],
+            cwd=project_dir,
+            env=_cli_env(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert run.returncode in (0, 1), run.stdout + run.stderr
+
+    result = _run_cli(project_dir, "auto", "pytest", "--framework-arg", "tests")
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["diagnostics"]
+    assert (project_dir / ".flast" / "models" / "latest" / "model.joblib").exists()
 
 
 def test_diagnostics_without_model_fails_cleanly(tmp_path: Path) -> None:

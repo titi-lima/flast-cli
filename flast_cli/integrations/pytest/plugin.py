@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -102,8 +103,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     manifest_path = config.getoption("--flast-manifest")
     if not manifest_path:
+        manifest_path = _auto_manifest_path(config)
+    if not manifest_path:
         return
     config.pluginmanager.register(
         _ManifestWriterPlugin(config, Path(manifest_path)),
         "flast-manifest-writer",
     )
+
+
+def _auto_manifest_path(config: pytest.Config) -> Optional[Path]:
+    """Enable regular pytest runs as FLAST observations after `flast init pytest`."""
+    try:
+        collect_only = bool(config.getoption("--collect-only"))
+    except (AssertionError, AttributeError, ValueError):
+        collect_only = False
+    if collect_only:
+        return None
+
+    rootpath = getattr(config, "rootpath", None)
+    if rootpath is None:
+        return None
+    root = Path(str(rootpath)).resolve()
+    workspace = root / ".flast"
+    config_path = workspace / "config.toml"
+    if not config_path.exists():
+        return None
+
+    return workspace / "runs" / str(uuid.uuid4()) / "manifest.json"

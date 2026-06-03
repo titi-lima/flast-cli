@@ -30,3 +30,9 @@ flast = "flast_cli.integrations.pytest.plugin"
 where = ["."]
 include = ["flast_cli*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+flast_cli = [
+    "integrations/vitest/flast-reporter.cjs",
+    "integrations/junit/FlastJUnitListener.java",
+]

@@ -14,28 +14,44 @@ It provides:
 ```bash
 python -m pip install -e .
 flast init pytest
-flast observe pytest --runs 10
-flast train
-flast predict pytest
+pytest
+pytest
+pytest
+flast auto pytest
 ```
+
+After `flast init pytest`, regular pytest runs automatically write observations
+into `.flast/runs/` through the pytest plugin. `flast auto pytest` rebuilds the
+corpus, retrains when enough labels exist, and emits diagnostics in one step.
+The lower-level `observe`, `train`, `predict`, and `diagnostics` commands remain
+available for scripts and non-pytest providers.
 
 Vitest projects use the same flow with `vitest`:
 
 ```bash
 flast init vitest
-flast observe vitest --runs 10 --framework-arg tests/sample.test.js
-flast train
-flast predict vitest --framework-arg tests/sample.test.js
+npm test
+npm test
+npm test
+flast auto vitest --framework-arg tests/sample.test.js
 ```
+
+`flast init vitest` installs `.flast/tools/vitest/flast-reporter.cjs` and patches
+a standard `package.json` `test` script so normal Vitest runs add observations.
 
 Ant/JUnit 5 projects can use `junit` when the JUnit Platform Console standalone
 jar is available under `lib/`:
 
 ```bash
 flast init junit
-flast observe junit --runs 10
-flast train
-flast predict junit
+./mvnw test
+./mvnw test
+./mvnw test
+flast auto junit
 ```
+
+`flast init junit` installs a JUnit Platform `TestExecutionListener` under
+`src/test/java/flast/` and registers it with ServiceLoader under
+`src/test/resources/META-INF/services/`.
 
 Provider authors should start with [docs/plugin-protocol.md](docs/plugin-protocol.md).

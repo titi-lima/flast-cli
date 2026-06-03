@@ -6,18 +6,26 @@ so additional providers can plug into the same command flow.
 
 ## Usage
 
-1. Install `flast-cli` in the Python environment used by your project.
-2. Run `Flast: Initialize Workspace`.
-3. Run `Flast: Observe Test Runs`.
-4. Run `Flast: Train Model`.
-5. Run `Flast: Refresh Diagnostics`.
+1. Run `Flast: Initialize Workspace`.
+2. Run your tests normally.
+3. Run `Flast: Refresh Diagnostics`.
 
-Diagnostics are advisory risk hints. FLAST runs pytest collection during
-prediction, so refresh is manual by default.
+Initialization enables the selected framework integration to capture regular
+test runs as observations. Pytest uses its plugin entry point, Vitest uses a
+local reporter installed under `.flast/tools/vitest/`, and JUnit uses a JUnit
+Platform listener registered through ServiceLoader. Refresh rebuilds the corpus,
+retrains when enough labels exist, and updates diagnostics in one command.
+
+The extension first looks for a bundled `flast-cli/` directory, then for the
+local repository layout used during extension development, and finally falls
+back to the `flast` command on `PATH`. Set `flast.executablePath` only when you
+need to override that resolver.
+
+Diagnostics are advisory risk hints. Refresh is manual by default.
 
 ## Settings
 
-- `flast.executablePath`: command or path used to invoke Flast.
+- `flast.executablePath`: optional command or path used to override FLAST resolution.
 - `flast.projectDir`: project root. Defaults to the first workspace folder.
 - `flast.framework`: framework provider used by FLAST commands.
 - `flast.frameworkArgs`: arguments forwarded to the selected framework provider.

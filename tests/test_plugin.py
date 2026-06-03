@@ -162,3 +162,31 @@ def test_xfail():
     assert outcomes["tests/test_outcomes.py::test_fail"] == "failed"
     assert outcomes["tests/test_outcomes.py::test_skip"] == "skipped"
     assert outcomes["tests/test_outcomes.py::test_xfail"] == "xfail"
+
+
+def test_plugin_auto_writes_manifest_after_workspace_init(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    tests_dir = project_dir / "tests"
+    tests_dir.mkdir(parents=True)
+    (project_dir / ".flast").mkdir()
+    (project_dir / ".flast" / "config.toml").write_text("schema_version = 1\n", encoding="utf-8")
+    (tests_dir / "test_sample.py").write_text(
+        "def test_sample():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests"],
+        cwd=project_dir,
+        env=_plugin_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    manifests = sorted((project_dir / ".flast" / "runs").glob("*/manifest.json"))
+    assert len(manifests) == 1
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["outcomes"] == [
+        {"test_id": "tests/test_sample.py::test_sample", "outcome": "passed"}
+    ]

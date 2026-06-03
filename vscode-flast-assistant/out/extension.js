@@ -67,8 +67,11 @@ function deactivate() {
 function readConfig() {
     const config = vscode.workspace.getConfiguration('flast');
     const frameworkArgs = config.get('frameworkArgs');
+    const executable = resolveFlastExecutable(config.get('executablePath', 'flast'));
     return {
-        executablePath: config.get('executablePath', 'flast'),
+        executablePath: executable.command,
+        executableArgs: executable.args,
+        pythonPath: executable.pythonPath,
         projectDir: resolveProjectDir(config.get('projectDir', '')),
         framework: config.get('framework', 'pytest'),
         frameworkArgs: frameworkArgs ?? config.get('pytestArgs', []),
@@ -77,6 +80,28 @@ function readConfig() {
         warningThreshold: config.get('warningThreshold', 0.5),
         diagnosticSeverity: config.get('diagnosticSeverity', 'warning')
     };
+}
+function resolveFlastExecutable(configuredPath) {
+    const trimmed = configuredPath.trim();
+    if (trimmed && trimmed !== 'flast') {
+        return { command: trimmed, args: [] };
+    }
+    const extensionRoot = vscode.extensions.getExtension('flast.flast-assistant')?.extensionPath;
+    const candidates = [
+        extensionRoot ? path.join(extensionRoot, 'flast-cli') : undefined,
+        path.resolve(__dirname, '..', '..'),
+        path.resolve(__dirname, '..', '..', '..')
+    ].filter((candidate) => Boolean(candidate));
+    for (const candidate of candidates) {
+        if (fs.existsSync(path.join(candidate, 'flast_cli', 'cli.py'))) {
+            return {
+                command: process.platform === 'win32' ? 'python' : 'python3',
+                args: ['-m', 'flast_cli.cli'],
+                pythonPath: candidate,
+            };
+        }
+    }
+    return { command: 'flast', args: [] };
 }
 function resolveProjectDir(configuredProjectDir) {
     if (configuredProjectDir.trim()) {
@@ -103,6 +128,7 @@ function scheduleRefresh() {
 async function initializeWorkspace() {
     const config = readConfig();
     await runSimpleCommand(['init', config.framework], 'Initialize FLAST workspace');
+    await refreshDiagnostics();
 }
 async function observeTestRuns() {
     const config = readConfig();
@@ -136,7 +162,7 @@ async function runSimpleCommand(baseArgs, title, includePytestArgs = false) {
 async function refreshDiagnostics() {
     const config = readConfig();
     const args = [
-        'diagnostics',
+        'auto',
         config.framework,
         '--format',
         'json',
@@ -158,10 +184,18 @@ function runFlast(config, args, token) {
         activeRun.kill();
         activeRun = undefined;
     }
-    output.appendLine(`$ ${config.executablePath} ${args.join(' ')}`);
+    const commandArgs = [...config.executableArgs, ...args];
+    output.appendLine(`$ ${config.executablePath} ${commandArgs.join(' ')}`);
     return new Promise((resolve, reject) => {
-        const child = childProcess.spawn(config.executablePath, args, {
+        const env = { ...process.env };
+        if (config.pythonPath) {
+            env.PYTHONPATH = env.PYTHONPATH
+                ? `${config.pythonPath}${path.delimiter}${env.PYTHONPATH}`
+                : config.pythonPath;
+        }
+        const child = childProcess.spawn(config.executablePath, commandArgs, {
             cwd: config.projectDir,
+            env,
             shell: process.platform === 'win32'
         });
         activeRun = child;
