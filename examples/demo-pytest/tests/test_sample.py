@@ -15,6 +15,9 @@ def _run_count() -> int:
 def test_flaky_toggle() -> None:
     assert _run_count() % 2 == 0
 
+def test_toggle() -> None:
+    assert _run_count() % 2 == 0
 
 def test_stable_pass() -> None:
     assert True
+

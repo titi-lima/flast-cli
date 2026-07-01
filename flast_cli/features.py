@@ -6,7 +6,7 @@ import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .schemas import FeatureInput
 
@@ -27,89 +27,161 @@ LANGUAGE_EXTENSIONS = {
 }
 
 
-COMMON_SIGNAL_RULES: Tuple[SignalRule, ...] = (
+JAVASCRIPT_COMMON_SIGNAL_RULES: Tuple[SignalRule, ...] = (
     SignalRule(
         "randomness",
         "uses random, crypto, or UUID generation",
-        tokens=("random", "secrets", "uuid", "crypto", "math.random", "randomuuid", "secureRandom"),
-        fragments=("Math.random", "randomUUID", "SecureRandom"),
+        tokens=("crypto", "randomuuid"),
+        fragments=("Math.random", "crypto.randomUUID", "randomUUID("),
     ),
     SignalRule(
         "time",
         "uses wall-clock or date/time APIs",
-        tokens=("time", "datetime", "date", "instant", "clock", "localdate", "localdatetime"),
-        fragments=("Date.now", "new Date", "System.currentTimeMillis", "Instant.now", "LocalDate"),
+        tokens=("date", "performance"),
+        fragments=("Date.now", "new Date", "performance.now"),
     ),
     SignalRule(
         "timing",
         "uses sleeps, timers, or timing-sensitive waits",
-        tokens=("sleep", "settimeout", "setinterval", "waitfor", "awaitility"),
-        fragments=("time.sleep", "Thread.sleep", "setTimeout", "setInterval", "waitFor"),
+        tokens=("settimeout", "setinterval", "cleartimeout", "clearinterval"),
+        fragments=("setTimeout", "setInterval", "clearTimeout", "clearInterval"),
     ),
     SignalRule(
         "filesystem state",
         "uses filesystem or shared local state",
-        tokens=("path", "pathlib", "tempfile", "shutil", "fs", "file", "files", "paths"),
-        fragments=("Path(", "Files.", "Paths.", "fs.", "readFile", "writeFile"),
+        tokens=("fs", "node:fs", "readfilesync", "writefilesync", "mkdtempsync", "rmsync"),
+        fragments=("fs.", "node:fs", "readFile", "writeFile", "mkdtemp", "rmSync"),
     ),
     SignalRule(
         "environment mutation",
         "reads or mutates process environment",
-        tokens=("environ", "env", "getenv", "setproperty", "clearproperty"),
-        fragments=("os.environ", "process.env", "System.getenv", "System.setProperty"),
+        tokens=("env",),
+        fragments=("process.env",),
     ),
     SignalRule(
         "network",
         "uses network-facing APIs",
-        tokens=("requests", "httpx", "socket", "urllib", "fetch", "axios", "http", "https", "okhttp"),
-        fragments=("fetch(", "axios.", "requests.", "httpx.", "new URL", "HttpClient"),
+        tokens=("fetch", "axios", "http", "https", "undici"),
+        fragments=("fetch(", "axios.", "http.", "https.", "undici"),
     ),
     SignalRule(
         "subprocess",
         "starts subprocesses or external commands",
-        tokens=("subprocess", "multiprocessing", "child_process", "exec", "spawn", "processbuilder"),
-        fragments=("subprocess.", "child_process", "ProcessBuilder", "Runtime.getRuntime"),
+        tokens=("child_process", "exec", "spawn", "execa"),
+        fragments=("child_process", "exec(", "spawn(", "execa("),
     ),
     SignalRule(
         "concurrency",
         "uses threads, async, or concurrent execution",
-        tokens=("threading", "asyncio", "concurrent", "promise", "worker", "thread", "executor"),
-        fragments=("Promise.", "Promise<", "CompletableFuture", "ExecutorService", "new Thread"),
+        tokens=("promise", "worker", "worker_threads"),
+        fragments=("Promise.", "Promise<", "Worker(", "worker_threads"),
     ),
 )
 
 
-LANGUAGE_SIGNAL_RULES = {
+COMMON_SIGNAL_RULES: Mapping[str, Tuple[SignalRule, ...]] = {
     "python": (
         SignalRule(
-            "parametrization",
-            "pytest parametrization can hide case-specific behavior",
-            fragments=("parametrize",),
+            "randomness",
+            "uses random, crypto, or UUID generation",
+            tokens=("random", "secrets", "uuid"),
+            fragments=("random.", "secrets.", "uuid."),
+        ),
+        SignalRule(
+            "time",
+            "uses wall-clock or date/time APIs",
+            tokens=("time", "datetime", "freezegun"),
+            fragments=("time.", "datetime.", "freezegun."),
+        ),
+        SignalRule(
+            "timing",
+            "uses sleeps, timers, or timing-sensitive waits",
+            tokens=("sleep",),
+            fragments=("time.sleep",),
+        ),
+        SignalRule(
+            "filesystem state",
+            "uses filesystem or shared local state",
+            tokens=("pathlib", "tempfile", "shutil"),
+            fragments=("Path(", "open(", "os.path", "shutil.", "tempfile."),
+        ),
+        SignalRule(
+            "environment mutation",
+            "reads or mutates process environment",
+            tokens=("environ", "getenv"),
+            fragments=("os.environ", "os.getenv", "monkeypatch.setenv", "monkeypatch.delenv"),
+        ),
+        SignalRule(
+            "network",
+            "uses network-facing APIs",
+            tokens=("requests", "httpx", "socket", "urllib"),
+            fragments=("requests.", "httpx.", "socket.", "urllib."),
+        ),
+        SignalRule(
+            "subprocess",
+            "starts subprocesses or external commands",
+            tokens=("subprocess", "multiprocessing"),
+            fragments=("subprocess.", "multiprocessing."),
+        ),
+        SignalRule(
+            "concurrency",
+            "uses threads, async, or concurrent execution",
+            tokens=("threading", "asyncio", "concurrent"),
+            fragments=("threading.", "asyncio.", "concurrent."),
         ),
     ),
     "java": (
         SignalRule(
-            "order dependence",
-            "uses static or lifecycle state that can leak between tests",
-            fragments=("static ", "@BeforeAll", "@AfterAll", "TestInstance"),
+            "randomness",
+            "uses random, crypto, or UUID generation",
+            tokens=("random", "securerandom", "uuid"),
+            fragments=("Random(", "SecureRandom", "UUID.randomUUID"),
         ),
-    ),
-    "javascript": (
         SignalRule(
-            "mock state",
-            "uses test doubles or module mocks that may leak between cases",
-            tokens=("vi", "jest", "mock", "spyon"),
-            fragments=("vi.mock", "jest.mock", "spyOn"),
+            "time",
+            "uses wall-clock or date/time APIs",
+            tokens=("instant", "clock", "localdate", "localdatetime", "date"),
+            fragments=("System.currentTimeMillis", "Instant.now", "LocalDate", "LocalDateTime", "new Date"),
         ),
-    ),
-    "typescript": (
         SignalRule(
-            "mock state",
-            "uses test doubles or module mocks that may leak between cases",
-            tokens=("vi", "jest", "mock", "spyon"),
-            fragments=("vi.mock", "jest.mock", "spyOn"),
+            "timing",
+            "uses sleeps, timers, or timing-sensitive waits",
+            tokens=("sleep", "waitfor", "awaitility"),
+            fragments=("Thread.sleep", "await().", ".waitFor("),
+        ),
+        SignalRule(
+            "filesystem state",
+            "uses filesystem or shared local state",
+            tokens=("files", "paths", "path"),
+            fragments=("Files.", "Paths.", "Path.of", "File("),
+        ),
+        SignalRule(
+            "environment mutation",
+            "reads or mutates process environment",
+            tokens=("getenv", "getproperty", "setproperty", "clearproperty"),
+            fragments=("System.getenv", "System.getProperty", "System.setProperty", "System.clearProperty"),
+        ),
+        SignalRule(
+            "network",
+            "uses network-facing APIs",
+            tokens=("httpclient", "httpurlconnection", "socket", "okhttp"),
+            fragments=("HttpClient", "HttpURLConnection", "new URL", "Socket(", "OkHttpClient"),
+        ),
+        SignalRule(
+            "subprocess",
+            "starts subprocesses or external commands",
+            tokens=("processbuilder", "runtime"),
+            fragments=("ProcessBuilder", "Runtime.getRuntime"),
+        ),
+        SignalRule(
+            "concurrency",
+            "uses threads, async, or concurrent execution",
+            tokens=("thread", "executor", "executors", "completablefuture"),
+            fragments=("new Thread", "ExecutorService", "Executors.", "CompletableFuture"),
         ),
     ),
+    "javascript": JAVASCRIPT_COMMON_SIGNAL_RULES,
+    "typescript": JAVASCRIPT_COMMON_SIGNAL_RULES,
 }
 
 
@@ -221,7 +293,7 @@ def detect_static_signals(feature: FeatureInput) -> List[Dict[str, str]]:
 
     language = _feature_language(feature)
     tokens = _source_tokens(source)
-    for rule in (*COMMON_SIGNAL_RULES, *LANGUAGE_SIGNAL_RULES.get(language, ())):
+    for rule in COMMON_SIGNAL_RULES.get(language, ()):
         if _matches_rule(rule, source, tokens):
             add(rule.kind, rule.detail)
 

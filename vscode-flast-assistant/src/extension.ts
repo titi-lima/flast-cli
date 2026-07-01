@@ -47,7 +47,7 @@ interface FlastDiagnosticsPayload {
 interface FlastConfig {
   executablePath: string;
   executableArgs: string[];
-  pythonPath?: string;
+  pythonPaths: string[];
   projectDir: string;
   framework: string;
   frameworkArgs: string[];
@@ -73,8 +73,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('flast.trainModel', () => runSimpleCommand(['train'], 'Train FLAST model')),
     vscode.commands.registerCommand('flast.refreshDiagnostics', () => refreshDiagnostics()),
     vscode.commands.registerCommand('flast.openLatestReport', openLatestReport),
-    vscode.workspace.onDidSaveTextDocument((document) => {
-      const config = readConfig();
+    vscode.workspace.onDidSaveTextDocument(async (document) => {
+      const config = await readConfig();
       if (config.languageIds.includes(document.languageId) && config.refreshMode === 'onSave') {
         scheduleRefresh();
       }
@@ -93,28 +93,32 @@ export function deactivate(): void {
   }
 }
 
-function readConfig(): FlastConfig {
+async function readConfig(): Promise<FlastConfig> {
   const config = vscode.workspace.getConfiguration('flast');
   const frameworkArgs = config.get<string[]>('frameworkArgs');
-  const executable = resolveFlastExecutable(config.get<string>('executablePath', 'flast'));
+  const projectDir = resolveProjectDir(config.get<string>('projectDir', ''));
+  const executable = await resolveFlastExecutable(config.get<string>('executablePath', 'flast'), projectDir);
   return {
     executablePath: executable.command,
     executableArgs: executable.args,
-    pythonPath: executable.pythonPath,
-    projectDir: resolveProjectDir(config.get<string>('projectDir', '')),
+    pythonPaths: executable.pythonPaths,
+    projectDir,
     framework: config.get<string>('framework', 'pytest'),
     frameworkArgs: frameworkArgs ?? config.get<string[]>('pytestArgs', []),
     languageIds: config.get<string[]>('languageIds', DEFAULT_LANGUAGE_IDS),
-    refreshMode: config.get<RefreshMode>('refreshMode', 'manual'),
+    refreshMode: config.get<RefreshMode>('refreshMode', 'onSave'),
     warningThreshold: config.get<number>('warningThreshold', 0.5),
     diagnosticSeverity: config.get<SeveritySetting>('diagnosticSeverity', 'warning')
   };
 }
 
-function resolveFlastExecutable(configuredPath: string): { command: string; args: string[]; pythonPath?: string } {
+async function resolveFlastExecutable(
+  configuredPath: string,
+  projectDir: string
+): Promise<{ command: string; args: string[]; pythonPaths: string[] }> {
   const trimmed = configuredPath.trim();
   if (trimmed && trimmed !== 'flast') {
-    return { command: trimmed, args: [] };
+    return { command: trimmed, args: [], pythonPaths: [] };
   }
 
   const extensionRoot = vscode.extensions.getExtension('flast.flast-assistant')?.extensionPath;
@@ -126,15 +130,77 @@ function resolveFlastExecutable(configuredPath: string): { command: string; args
 
   for (const candidate of candidates) {
     if (fs.existsSync(path.join(candidate, 'flast_cli', 'cli.py'))) {
+      const pythonCommand = await resolvePythonCommand(projectDir);
       return {
-        command: process.platform === 'win32' ? 'python' : 'python3',
-        args: ['-m', 'flast_cli.cli'],
-        pythonPath: candidate,
+        command: pythonCommand[0],
+        args: [...pythonCommand.slice(1), '-m', 'flast_cli.cli'],
+        pythonPaths: [candidate],
       };
     }
   }
 
-  return { command: 'flast', args: [] };
+  return { command: 'flast', args: [], pythonPaths: [] };
+}
+
+async function resolvePythonCommand(projectDir: string): Promise<string[]> {
+  const flastConfig = vscode.workspace.getConfiguration('flast');
+  const configuredPythonPath = flastConfig.get<string>('pythonPath', '').trim();
+  if (configuredPythonPath) {
+    return [configuredPythonPath];
+  }
+
+  const nearbyVenvPython = findNearbyVenvPython(projectDir);
+  if (nearbyVenvPython) {
+    return [nearbyVenvPython];
+  }
+
+  const resource = vscode.Uri.file(projectDir);
+  const pythonExtension = vscode.extensions.getExtension('ms-python.python');
+  if (pythonExtension) {
+    try {
+      const api = pythonExtension.isActive ? pythonExtension.exports : await pythonExtension.activate();
+      const executionDetails = api?.settings?.getExecutionDetails?.(resource);
+      const execCommand = executionDetails?.execCommand;
+      if (Array.isArray(execCommand) && execCommand.length > 0) {
+        return execCommand.map(String);
+      }
+    } catch (error) {
+      output.appendLine(`Unable to read VS Code Python interpreter selection: ${(error as Error).message}`);
+    }
+  }
+
+  const pythonConfig = vscode.workspace.getConfiguration('python', resource);
+  const defaultInterpreter = pythonConfig.get<string>('defaultInterpreterPath', '').trim();
+  if (defaultInterpreter) {
+    return [defaultInterpreter];
+  }
+  const legacyInterpreter = pythonConfig.get<string>('pythonPath', '').trim();
+  if (legacyInterpreter) {
+    return [legacyInterpreter];
+  }
+
+  return [process.platform === 'win32' ? 'python' : 'python3'];
+}
+
+function findNearbyVenvPython(projectDir: string): string | undefined {
+  let current = path.resolve(projectDir);
+
+  while (true) {
+    for (const venvName of ['.venv', 'venv']) {
+      const executable = process.platform === 'win32'
+        ? path.join(current, venvName, 'Scripts', 'python.exe')
+        : path.join(current, venvName, 'bin', 'python');
+      if (fs.existsSync(executable)) {
+        return executable;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
 }
 
 function resolveProjectDir(configuredProjectDir: string): string {
@@ -163,13 +229,12 @@ function scheduleRefresh(): void {
 }
 
 async function initializeWorkspace(): Promise<void> {
-  const config = readConfig();
+  const config = await readConfig();
   await runSimpleCommand(['init', config.framework], 'Initialize FLAST workspace');
-  await refreshDiagnostics();
 }
 
 async function observeTestRuns(): Promise<void> {
-  const config = readConfig();
+  const config = await readConfig();
   const runs = await vscode.window.showInputBox({
     title: 'Flast: Observe Test Runs',
     prompt: `Number of repeated ${config.framework} runs to observe`,
@@ -186,7 +251,7 @@ async function observeTestRuns(): Promise<void> {
 }
 
 async function runSimpleCommand(baseArgs: string[], title: string, includePytestArgs = false): Promise<void> {
-  const config = readConfig();
+  const config = await readConfig();
   const args = [
     ...baseArgs,
     '--project-dir',
@@ -199,11 +264,20 @@ async function runSimpleCommand(baseArgs: string[], title: string, includePytest
       await runFlast(config, args, token);
     }
   );
+  await refreshDiagnosticsAfterCommand();
   vscode.window.showInformationMessage(`${title} completed.`);
 }
 
-async function refreshDiagnostics(): Promise<void> {
-  const config = readConfig();
+async function refreshDiagnosticsAfterCommand(): Promise<void> {
+  try {
+    await refreshDiagnostics({ showErrors: false });
+  } catch {
+    // The output channel already has the diagnostic refresh failure details.
+  }
+}
+
+async function refreshDiagnostics(options: { showErrors?: boolean } = {}): Promise<void> {
+  const config = await readConfig();
   const args = [
     'auto',
     config.framework,
@@ -217,7 +291,7 @@ async function refreshDiagnostics(): Promise<void> {
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: 'Refreshing FLAST diagnostics', cancellable: true },
     async (_progress, token) => {
-      const result = await runFlast(config, args, token);
+      const result = await runFlast(config, args, token, { showErrors: options.showErrors ?? true });
       const payload = parseDiagnostics(result.stdout);
       applyDiagnostics(payload, config);
     }
@@ -231,7 +305,8 @@ function frameworkArgs(args: string[]): string[] {
 function runFlast(
   config: FlastConfig,
   args: string[],
-  token: vscode.CancellationToken
+  token: vscode.CancellationToken,
+  options: { showErrors?: boolean } = {}
 ): Promise<{ stdout: string; stderr: string }> {
   if (activeRun) {
     activeRun.kill();
@@ -243,10 +318,16 @@ function runFlast(
 
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const env = { ...process.env };
-    if (config.pythonPath) {
+    let pythonPath = '';
+    if (config.pythonPaths.length > 0) {
+      pythonPath = config.pythonPaths.join(path.delimiter);
       env.PYTHONPATH = env.PYTHONPATH
-        ? `${config.pythonPath}${path.delimiter}${env.PYTHONPATH}`
-        : config.pythonPath;
+        ? `${pythonPath}${path.delimiter}${env.PYTHONPATH}`
+        : pythonPath;
+    }
+    output.appendLine(`FLAST project dir: ${config.projectDir}`);
+    if (pythonPath) {
+      output.appendLine(`FLAST bundled PYTHONPATH entries: ${pythonPath}`);
     }
 
     const child = childProcess.spawn(config.executablePath, commandArgs, {
@@ -292,7 +373,11 @@ function runFlast(
   }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     output.show(true);
-    vscode.window.showErrorMessage(`FLAST failed: ${message}`);
+    if (options.showErrors ?? true) {
+      vscode.window.showErrorMessage(`FLAST failed: ${message}`);
+    } else {
+      output.appendLine(`FLAST diagnostics refresh skipped: ${message}`);
+    }
     throw error;
   });
 }
@@ -341,7 +426,7 @@ function applyDiagnostics(payload: FlastDiagnosticsPayload, config: FlastConfig)
 }
 
 async function openLatestReport(): Promise<void> {
-  const config = readConfig();
+  const config = await readConfig();
   const reportsDir = path.join(config.projectDir, '.flast', 'reports');
   if (!fs.existsSync(reportsDir)) {
     vscode.window.showWarningMessage('No FLAST reports directory exists yet.');

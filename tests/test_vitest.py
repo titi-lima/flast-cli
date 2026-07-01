@@ -116,7 +116,8 @@ test('uses async shared state', async () => {
     )
     kinds = {item["kind"] for item in detect_static_signals(feature)}
 
-    assert {"randomness", "time", "timing", "filesystem state", "environment mutation", "mock state"}.issubset(kinds)
+    assert {"randomness", "time", "timing", "filesystem state", "environment mutation"}.issubset(kinds)
+    assert "mock state" not in kinds
 
 
 def _prediction(test_id: str, test_file: Path):

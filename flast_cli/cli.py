@@ -8,7 +8,7 @@ import shutil
 import sys
 import uuid
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from .adapters import FrameworkAdapter, get_adapter, supported_frameworks
 from .constants import (
@@ -26,7 +26,6 @@ from .corpus import iter_manifest_sources, rebuild_corpus
 from .diagnostics import build_diagnostics
 from .features import build_feature_text, detect_static_signals
 from .manifests import load_labels, load_manifest, load_report, write_report
-from .model import ExplainedPrediction, TrainingParams, load_trained_artifacts, predict_with_explanations, train_model
 from .reporting import render_report, write_optional_output
 from .schemas import FeatureInput, LabelRecord, PredictionRecord, PredictionReport
 from .workspace import (
@@ -328,6 +327,8 @@ def _rebuild_workspace_corpus(project_root: Path, min_observations: int) -> tupl
 
 
 def _train_from_workspace(project_root: Path) -> Optional[dict]:
+    from .model import TrainingParams, train_model
+
     labels = load_labels(ensure_workspace(project_root).labels_path)
     trainable = [label for label in labels if label.label in {"flaky", "non_flaky"}]
     trainable_labels = {label.label for label in trainable}
@@ -408,6 +409,8 @@ def run_observe(args: argparse.Namespace) -> int:
 
 
 def run_train(args: argparse.Namespace) -> int:
+    from .model import TrainingParams, train_model
+
     project_root = _project_root(args.project_dir)
     ensure_workspace(project_root)
     labels = load_labels(ensure_workspace(project_root).labels_path)
@@ -470,6 +473,8 @@ def create_prediction_report(
     framework: str,
     framework_args: Sequence[str],
 ) -> PredictionReport:
+    from .model import load_trained_artifacts, predict_with_explanations
+
     ensure_workspace(project_root)
     adapter = _adapter_for(framework)
     manifest_path = _run_framework_collection(
@@ -533,7 +538,7 @@ def create_prediction_report(
 def _build_prediction_explanation(
     *,
     feature: FeatureInput,
-    prediction: ExplainedPrediction,
+    prediction: Any,
     observed_label: Optional[LabelRecord],
 ) -> dict:
     static_signals = detect_static_signals(feature)

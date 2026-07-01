@@ -28,5 +28,12 @@ node_modules/
 .*
 !.github
 !.gitignore
+
+# VS Code extension source is tracked; generated artifacts are not.
+!vscode-flast-assistant/.vscodeignore
+vscode-flast-assistant/out/
+vscode-flast-assistant/*.vsix
+vscode-flast-assistant/flast-cli/
+
 *_playground/
 .venv/
