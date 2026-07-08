@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+from flast_cli.constants import SCHEMA_VERSION
+from flast_cli.manifests import write_manifest
+from flast_cli.schemas import CollectedTest, RunManifest, TestOutcome as ManifestOutcome
+from flast_cli.workspace import ensure_workspace, run_manifest_path
 
 
 def _cli_env() -> dict:
@@ -197,6 +205,61 @@ def test_init_vitest_installs_reporter_and_patches_test_script(tmp_path: Path) -
     assert package["scripts"]["test"].count("flast-reporter.cjs") == 1
 
 
+def test_vitest_reporter_writes_manifest_with_vitest4_hook(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    result = _run_cli(project_dir, "init", "vitest")
+    assert result.returncode == 0, result.stderr
+    reporter = project_dir / ".flast" / "tools" / "vitest" / "flast-reporter.cjs"
+
+    script = """
+const Reporter = require(process.argv[1]);
+const reporter = new Reporter();
+function testCase(name, fullName, state) {
+  return {
+    name,
+    fullName,
+    result() {
+      return { state };
+    },
+  };
+}
+reporter.onTestRunEnd([
+  {
+    relativeModuleId: "tests/sample.test.js",
+    children: {
+      allTests() {
+        return [
+          testCase("flaky toggle", "demo suite > flaky toggle", "failed"),
+          testCase("stable pass", "demo suite > stable pass", "passed"),
+        ];
+      },
+    },
+  },
+]);
+"""
+    node = subprocess.run(
+        ["node", "-e", script, str(reporter)],
+        cwd=project_dir,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert node.returncode == 0, node.stderr
+
+    manifests = sorted((project_dir / ".flast" / "runs").glob("*/manifest.json"))
+    assert len(manifests) == 1
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["collected"] == [
+        {"test_id": "tests/sample.test.js::demo suite::flaky toggle"},
+        {"test_id": "tests/sample.test.js::demo suite::stable pass"},
+    ]
+    assert payload["outcomes"] == [
+        {"test_id": "tests/sample.test.js::demo suite::flaky toggle", "outcome": "failed"},
+        {"test_id": "tests/sample.test.js::demo suite::stable pass", "outcome": "passed"},
+    ]
+
+
 def test_init_junit_installs_platform_listener(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -217,6 +280,34 @@ def test_init_junit_installs_platform_listener(tmp_path: Path) -> None:
     assert listener.exists()
     assert "class FlastJUnitListener" in listener.read_text(encoding="utf-8")
     assert service.read_text(encoding="utf-8") == "flast.FlastJUnitListener\n"
+
+
+def test_init_junit_patches_ant_build_to_copy_test_resources(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "build.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<project name="demo" default="test">
+    <property name="src.test" value="src/test/java"/>
+    <property name="classes.test" value="build/classes/test"/>
+    <target name="compile">
+        <mkdir dir="${classes.test}"/>
+        <javac includeantruntime="false" srcdir="${src.test}" destdir="${classes.test}"/>
+    </target>
+</project>
+""",
+        encoding="utf-8",
+    )
+
+    result = _run_cli(project_dir, "init", "junit")
+    assert result.returncode == 0, result.stderr
+    second = _run_cli(project_dir, "init", "junit")
+    assert second.returncode == 0, second.stderr
+
+    build_xml = (project_dir / "build.xml").read_text(encoding="utf-8")
+    assert '<property name="src.test.resources" value="src/test/resources"/>' in build_xml
+    assert '<fileset dir="${src.test.resources}" erroronmissingdir="false"/>' in build_xml
+    assert build_xml.count("src.test.resources") == 2
 
 
 def test_predict_without_model_fails_cleanly(tmp_path: Path) -> None:
@@ -264,6 +355,124 @@ def test_auto_rebuilds_trains_and_emits_diagnostics_from_accumulated_runs(tmp_pa
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["diagnostics"]
+    assert (project_dir / ".flast" / "models" / "latest" / "model.joblib").exists()
+
+
+@pytest.mark.parametrize(
+    ("framework", "test_id", "stable_test_id", "source"),
+    [
+        (
+            "pytest",
+            "tests/test_sample.py::test_flaky_toggle",
+            "tests/test_sample.py::test_stable_pass",
+            "def test_flaky_toggle():\n    assert True\n\n"
+            "def test_stable_pass():\n    assert True\n",
+        ),
+        (
+            "vitest",
+            "tests/sample.test.js::demo suite::flaky toggle",
+            "tests/sample.test.js::demo suite::stable pass",
+            "import { describe, test, expect } from 'vitest';\n"
+            "describe('demo suite', () => {\n"
+            "  test('flaky toggle', () => {\n"
+            "    expect(true).toBe(true);\n"
+            "  });\n"
+            "  test('stable pass', () => {\n"
+            "    expect(true).toBe(true);\n"
+            "  });\n"
+            "});\n",
+        ),
+        (
+            "junit",
+            "src/test/java/com/example/AppTest.java::com.example.AppTest::flakyToggle",
+            "src/test/java/com/example/AppTest.java::com.example.AppTest::stablePass",
+            "package com.example;\n"
+            "import org.junit.jupiter.api.Test;\n"
+            "class AppTest {\n"
+            "    @Test\n"
+            "    void flakyToggle() {\n"
+            "        org.junit.jupiter.api.Assertions.assertTrue(true);\n"
+            "    }\n"
+            "    @Test\n"
+            "    void stablePass() {\n"
+            "        org.junit.jupiter.api.Assertions.assertTrue(true);\n"
+            "    }\n"
+            "}\n",
+        ),
+    ],
+)
+def test_auto_rebuilds_trains_and_emits_diagnostics_for_each_framework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    framework: str,
+    test_id: str,
+    stable_test_id: str,
+    source: str,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    source_path = project_dir / test_id.split("::", 1)[0]
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(source, encoding="utf-8")
+    ensure_workspace(project_dir)
+
+    for index, outcome in enumerate(["passed", "failed", "passed"]):
+        manifest_path = run_manifest_path(project_dir, f"observed-{index}")
+        write_manifest(
+            manifest_path,
+            RunManifest(
+                schema_version=SCHEMA_VERSION,
+                framework=framework,
+                run_id=f"observed-{index}",
+                project_root=str(project_dir),
+                tool={"name": framework, "version": "test"},
+                collected=[
+                    CollectedTest(test_id=test_id),
+                    CollectedTest(test_id=stable_test_id),
+                ],
+                outcomes=[
+                    ManifestOutcome(test_id=test_id, outcome=outcome),
+                    ManifestOutcome(test_id=stable_test_id, outcome="passed"),
+                ],
+            ),
+        )
+
+    def fake_collection(*, adapter, project_root, framework_args):
+        manifest_path = run_manifest_path(project_root, "collection")
+        write_manifest(
+            manifest_path,
+            RunManifest(
+                schema_version=SCHEMA_VERSION,
+                framework=adapter.framework,
+                run_id="collection",
+                project_root=str(project_root),
+                tool={"name": adapter.framework, "version": "test"},
+                collected=[CollectedTest(test_id=test_id)],
+                outcomes=[],
+            ),
+        )
+        return manifest_path
+
+    monkeypatch.setattr("flast_cli.cli._run_framework_collection", fake_collection)
+
+    from flast_cli.cli import run_auto
+
+    result = run_auto(
+        argparse.Namespace(
+            project_dir=str(project_dir),
+            framework=framework,
+            framework_args=[],
+            min_observations=None,
+            output=None,
+        )
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["framework"] == framework
+    assert payload["diagnostics"]
+    assert payload["diagnostics"][0]["test_id"] == test_id
     assert (project_dir / ".flast" / "models" / "latest" / "model.joblib").exists()
 
 

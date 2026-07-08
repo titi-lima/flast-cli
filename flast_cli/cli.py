@@ -311,6 +311,43 @@ def _init_junit_autocapture(project_root: Path) -> None:
     service_target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(listener_source, listener_target)
     service_target.write_text("flast.FlastJUnitListener\n", encoding="utf-8")
+    _init_ant_junit_autocapture(project_root)
+
+
+def _init_ant_junit_autocapture(project_root: Path) -> None:
+    build_xml = project_root / "build.xml"
+    if not build_xml.exists():
+        return
+
+    text = build_xml.read_text(encoding="utf-8")
+    if "src.test.resources" not in text:
+        marker = '<property name="src.test" value="src/test/java"/>'
+        if marker in text:
+            text = text.replace(
+                marker,
+                marker + '\n    <property name="src.test.resources" value="src/test/resources"/>',
+                1,
+            )
+
+    resources_dir = "${src.test.resources}" if "src.test.resources" in text else "src/test/resources"
+    service_copy = (
+        '        <copy todir="${classes.test}">\n'
+        f'            <fileset dir="{resources_dir}" erroronmissingdir="false"/>\n'
+        "        </copy>"
+    )
+    if 'erroronmissingdir="false"' not in text and service_copy not in text:
+        marker = "        </javac>"
+        if marker in text:
+            text = text.replace(marker, marker + "\n" + service_copy, 1)
+        else:
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                if "<javac" in line and "/>" in line:
+                    lines.insert(index + 1, service_copy)
+                    text = "\n".join(lines) + "\n"
+                    break
+
+    build_xml.write_text(text, encoding="utf-8")
 
 
 def _rebuild_workspace_corpus(project_root: Path, min_observations: int) -> tuple[int, int, dict]:
