@@ -1,9 +1,9 @@
 """Shared constants for workspace and artifact versions."""
 
 SCHEMA_VERSION = 1
-# Version 2 switches the model input from CLI metadata plus source to the raw
-# static test source used by the reference FLAST implementation.
-FEATURE_SCHEMA_VERSION = 2
+# Version 3 fits vectorization and random projection on the complete known
+# corpus before selecting labeled kNN rows, matching FLAST's preprocessing.
+FEATURE_SCHEMA_VERSION = 3
 DEFAULT_FRAMEWORK = "pytest"
 DEFAULT_RUNS = 10
 DEFAULT_MIN_OBSERVATIONS = 3

@@ -114,11 +114,15 @@ def train_model(
     feature_texts: Sequence[str],
     params: TrainingParams,
 ) -> dict:
-    labeled = [
-        (label, feature)
-        for label, feature in zip(labels, feature_texts)
+    if len(labels) != len(feature_texts):
+        raise ValueError("Labels and feature texts must have the same length.")
+
+    labeled_indices = [
+        index
+        for index, label in enumerate(labels)
         if label.label in {"flaky", "non_flaky"}
     ]
+    labeled = [(labels[index], feature_texts[index]) for index in labeled_indices]
     if not labeled:
         raise ValueError("No labeled samples available for training.")
 
@@ -129,9 +133,13 @@ def train_model(
         )
 
     vectorizer = CountVectorizer()
-    matrix = vectorizer.fit_transform([feature for _, feature in labeled])
+    # FLAST vectorizes and projects the complete corpus before selecting the
+    # rows used by a training fold. Keep unlabeled known tests in that corpus,
+    # then fit kNN only on rows with ground-truth labels.
+    matrix = vectorizer.fit_transform(feature_texts)
     matrix, projection = _project_features(matrix, eps=params.eps, fit=True)
     matrix = _as_flast_matrix(matrix)
+    matrix = matrix[labeled_indices]
     effective_k = min(params.k, len(labeled))
     model = KNeighborsClassifier(
         algorithm=params.algorithm,
@@ -155,6 +163,7 @@ def train_model(
             "algorithm": params.algorithm,
         },
         "corpus_size": len(labeled),
+        "vectorization_corpus_size": len(labels),
         "label_counts": {
             "flaky": int(np.sum(target == 1)),
             "non_flaky": int(np.sum(target == 0)),
@@ -252,16 +261,7 @@ def predict_with_explanations(
             else:
                 psi += weight
 
-        if phi == float("inf") and psi == float("inf"):
-            score = 0.0
-        elif psi == float("inf"):
-            score = 0.0
-        elif phi == float("inf"):
-            score = 1.0
-        elif (phi + psi) == 0:
-            score = 0.0
-        else:
-            score = phi / (phi + psi)
+        score, prediction = _flast_vote(phi=phi, psi=psi, sigma=sigma)
 
         nearest_examples = _neighbor_evidence(
             training_index=artifacts.training_index,
@@ -273,12 +273,27 @@ def predict_with_explanations(
         explained.append(
             ExplainedPrediction(
                 score=float(score),
-                predicted_label="flaky" if score >= sigma else "non_flaky",
+                predicted_label="flaky" if prediction == 1 else "non_flaky",
                 nearest_examples=nearest_examples,
             )
         )
 
     return explained
+
+
+def _flast_vote(*, phi: float, psi: float, sigma: float) -> Tuple[float, int]:
+    """Return score and label using FLAST's exact limit-case ordering."""
+    if phi == float("inf") and psi == float("inf"):
+        return 0.0, 0
+    if psi == float("inf"):
+        return 0.0, 0
+    if phi == float("inf"):
+        return 1.0, 1
+    if (phi + psi) == 0:
+        return 0.0, 0
+
+    score = phi / (phi + psi)
+    return score, 1 if score >= sigma else 0
 
 
 def _neighbor_evidence(
