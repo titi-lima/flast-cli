@@ -9,6 +9,12 @@ It provides:
 - thin Pytest, Vitest, and JUnit providers that emit manifests with collected test IDs and outcomes
 - a local `.flast/` workspace for observations, labels, models, and reports
 
+The classifier uses FLAST's original static representation and kNN procedure:
+raw test source is tokenized with `CountVectorizer`, projected using its
+Johnson–Lindenstrauss dimension, then classified with FLAST's thresholded
+neighbor vote. Existing models trained by older CLI versions are intentionally
+rejected and must be retrained after this representation update.
+
 ## Quick start
 
 ```bash

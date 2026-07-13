@@ -85,16 +85,26 @@ def _project_features(
     fit: bool,
     projection: Optional[SparseRandomProjection] = None,
 ):
-    if eps <= 0:
+    # This follows flast.flastVectorization: epsilon zero skips the random
+    # projection; otherwise use the JL lower bound based on sample count.
+    if eps == 0:
         return matrix, None
     if fit:
         dim = int(johnson_lindenstrauss_min_dim(matrix.shape[0], eps=eps))
-        dim = max(1, min(dim, matrix.shape[1] or 1))
-        projection = SparseRandomProjection(n_components=dim, random_state=0)
+        # Do not cap this at the vocabulary size.  FLAST intentionally uses
+        # the JL dimension as-is, including when it expands the input space.
+        projection = SparseRandomProjection(n_components=dim)
         return projection.fit_transform(matrix), projection
     if projection is None:
         raise ValueError("Projection artifact missing for projected inference.")
     return projection.transform(matrix), projection
+
+
+def _as_flast_matrix(matrix) -> np.ndarray:
+    """Match FLAST's dense row representation before fitting or querying kNN."""
+    if hasattr(matrix, "toarray"):
+        matrix = matrix.toarray()
+    return np.asarray(matrix)
 
 
 def train_model(
@@ -121,6 +131,7 @@ def train_model(
     vectorizer = CountVectorizer()
     matrix = vectorizer.fit_transform([feature for _, feature in labeled])
     matrix, projection = _project_features(matrix, eps=params.eps, fit=True)
+    matrix = _as_flast_matrix(matrix)
     effective_k = min(params.k, len(labeled))
     model = KNeighborsClassifier(
         algorithm=params.algorithm,
@@ -220,6 +231,7 @@ def predict_with_explanations(
         fit=False,
         projection=artifacts.projection,
     )
+    matrix = _as_flast_matrix(matrix)
     distances, neighbors = artifacts.model.kneighbors(matrix)
     labels = np.asarray(artifacts.model._y)  # populated by sklearn during fit
     sigma = float(artifacts.metadata["params"]["sigma"])

@@ -174,6 +174,54 @@ def test_observe_reuse_history_merges_imported_manifest(tmp_path: Path) -> None:
     )
     assert second.returncode == 0, second.stderr
 
+    labels_path = project_dir / ".flast" / "corpus" / "labels.jsonl"
+    labels = [
+        json.loads(line)
+        for line in labels_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    labels_by_test = {item["test_id"]: item["label"] for item in labels}
+    assert labels_by_test["tests/test_sample.py::test_flaky_toggle"] == "flaky"
+
+
+def test_history_invalidate_removes_one_test_from_managed_history(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ensure_workspace(project_dir)
+    flaky_test_id = "tests/test_sample.py::test_flaky_toggle"
+    stable_test_id = "tests/test_sample.py::test_stable_pass"
+
+    for index, flaky_outcome in enumerate(["passed", "failed", "passed"]):
+        write_manifest(
+            run_manifest_path(project_dir, f"run-{index}"),
+            RunManifest(
+                schema_version=SCHEMA_VERSION,
+                framework="pytest",
+                run_id=f"run-{index}",
+                project_root=str(project_dir),
+                tool={"name": "pytest", "version": "test"},
+                collected=[
+                    CollectedTest(test_id=flaky_test_id),
+                    CollectedTest(test_id=stable_test_id),
+                ],
+                outcomes=[
+                    ManifestOutcome(test_id=flaky_test_id, outcome=flaky_outcome),
+                    ManifestOutcome(test_id=stable_test_id, outcome="passed"),
+                ],
+            ),
+        )
+
+    result = _run_cli(project_dir, "history", "invalidate", "test_flaky_toggle")
+
+    assert result.returncode == 0, result.stderr
+    assert flaky_test_id in result.stdout
+    assert "removed 3 outcome(s)" in result.stdout
+    for manifest_path in sorted((project_dir / ".flast" / "runs").glob("*/manifest.json")):
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert flaky_test_id not in {item["test_id"] for item in payload["collected"]}
+        assert flaky_test_id not in {item["test_id"] for item in payload["outcomes"]}
+        assert stable_test_id in {item["test_id"] for item in payload["outcomes"]}
+
     labels = [
         json.loads(line)
         for line in (project_dir / ".flast" / "corpus" / "labels.jsonl")
@@ -182,7 +230,42 @@ def test_observe_reuse_history_merges_imported_manifest(tmp_path: Path) -> None:
         if line.strip()
     ]
     labels_by_test = {item["test_id"]: item["label"] for item in labels}
-    assert labels_by_test["tests/test_sample.py::test_flaky_toggle"] == "flaky"
+    assert flaky_test_id not in labels_by_test
+    assert labels_by_test[stable_test_id] == "non_flaky"
+
+
+def test_history_invalidate_rejects_ambiguous_selectors(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ensure_workspace(project_dir)
+    first_test_id = "tests/test_one.py::test_shared_name"
+    second_test_id = "tests/test_two.py::test_shared_name"
+
+    write_manifest(
+        run_manifest_path(project_dir, "run-1"),
+        RunManifest(
+            schema_version=SCHEMA_VERSION,
+            framework="pytest",
+            run_id="run-1",
+            project_root=str(project_dir),
+            tool={"name": "pytest", "version": "test"},
+            collected=[
+                CollectedTest(test_id=first_test_id),
+                CollectedTest(test_id=second_test_id),
+            ],
+            outcomes=[
+                ManifestOutcome(test_id=first_test_id, outcome="passed"),
+                ManifestOutcome(test_id=second_test_id, outcome="passed"),
+            ],
+        ),
+    )
+
+    result = _run_cli(project_dir, "history", "invalidate", "test_shared_name")
+
+    assert result.returncode == 1
+    assert "matched 2 tests" in result.stderr
+    assert first_test_id in result.stderr
+    assert second_test_id in result.stderr
 
 
 def test_init_vitest_installs_reporter_and_patches_test_script(tmp_path: Path) -> None:

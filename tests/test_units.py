@@ -141,6 +141,31 @@ def test_parametrized_case(value):
     assert {"randomness", "timing", "filesystem state", "environment mutation", "parametrization"}.issubset(kinds)
 
 
+def test_static_signal_detection_honors_flast_ignore_comments(tmp_path: Path) -> None:
+    test_file = tmp_path / "tests" / "test_example.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        """
+def test_ignored_static_signals():
+    # flast:ignore
+    time.sleep(1)
+    random.random()  # flast:ignore
+    Path("shared-state.txt").write_text("1")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    feature = resolve_feature_input(
+        "tests/test_example.py::test_ignored_static_signals", tmp_path
+    )
+    kinds = {item["kind"] for item in detect_static_signals(feature)}
+
+    assert "timing" not in kinds
+    assert "randomness" not in kinds
+    assert "filesystem state" in kinds
+
+
 def test_diagnostic_line_resolution_supports_module_and_class_tests(tmp_path: Path) -> None:
     test_file = tmp_path / "tests" / "test_example.py"
     test_file.parent.mkdir(parents=True)

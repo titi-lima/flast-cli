@@ -272,19 +272,20 @@ def resolve_feature_input(test_id: str, project_root: Path) -> FeatureInput:
 
 
 def build_feature_text(feature: FeatureInput) -> str:
-    parts = [f"test_id: {feature.normalized_test_id}"]
-    if feature.class_name:
-        parts.append(f"class_name: {feature.class_name}")
-    if feature.test_name:
-        parts.append(f"test_name: {feature.test_name}")
-    parts.append("source:")
-    parts.append(feature.source_text)
-    return "\n".join(parts)
+    """Return the static-test representation consumed by the FLAST model.
+
+    The reference implementation feeds ``CountVectorizer`` the test source
+    directly.  Identifiers and framework metadata are useful for reports, but
+    including them here changes the token counts and therefore kNN distances.
+    Keep the classifier input limited to source text so its feature space is
+    the same as FLAST's.
+    """
+    return feature.source_text
 
 
 def detect_static_signals(feature: FeatureInput) -> List[Dict[str, str]]:
     """Return lightweight source clues commonly associated with flaky tests."""
-    source = feature.source_text
+    source = _source_without_static_ignores(feature.source_text)
     signals: List[Dict[str, str]] = []
 
     def add(kind: str, detail: str) -> None:
@@ -305,6 +306,34 @@ def detect_static_signals(feature: FeatureInput) -> List[Dict[str, str]]:
         add("parametrization", "pytest parametrization can hide case-specific behavior")
 
     return signals
+
+
+def _source_without_static_ignores(source: str) -> str:
+    lines = source.splitlines()
+    ignored_lines: Set[int] = set()
+    ignore_next = False
+
+    for index, line in enumerate(lines):
+        if ignore_next:
+            ignored_lines.add(index)
+            ignore_next = False
+
+        if "flast:ignore" not in line:
+            continue
+
+        ignored_lines.add(index)
+        if _is_standalone_ignore_comment(line):
+            ignore_next = True
+
+    return "\n".join(
+        "" if index in ignored_lines else line
+        for index, line in enumerate(lines)
+    )
+
+
+def _is_standalone_ignore_comment(line: str) -> bool:
+    before_directive = line.split("flast:ignore", 1)[0].strip()
+    return before_directive in {"#", "//", "/*", "*", "<!--"}
 
 
 def _feature_language(feature: FeatureInput) -> str:

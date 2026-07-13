@@ -25,9 +25,9 @@ from .constants import (
 from .corpus import iter_manifest_sources, rebuild_corpus
 from .diagnostics import build_diagnostics
 from .features import build_feature_text, detect_static_signals
-from .manifests import load_labels, load_manifest, load_report, write_report
+from .manifests import load_labels, load_manifest, load_report, write_manifest, write_report
 from .reporting import render_report, write_optional_output
-from .schemas import FeatureInput, LabelRecord, PredictionRecord, PredictionReport
+from .schemas import FeatureInput, LabelRecord, PredictionRecord, PredictionReport, RunManifest
 from .workspace import (
     ensure_workspace,
     latest_report_path,
@@ -186,6 +186,33 @@ def create_parser() -> argparse.ArgumentParser:
     group = report_parser.add_mutually_exclusive_group()
     group.add_argument("--latest", action="store_true", help="Render the latest report")
     group.add_argument("--run-id", help="Render the report for a specific run id")
+
+    history_parser = sub.add_parser("history", help="Manage observed test history")
+    history_sub = history_parser.add_subparsers(dest="history_command", required=True)
+    invalidate_parser = history_sub.add_parser(
+        "invalidate",
+        help="Remove one test from stored observation history",
+    )
+    invalidate_parser.add_argument(
+        "selector",
+        help="Test selector: full id, test name, file::name suffix, or unique substring",
+    )
+    invalidate_parser.add_argument(
+        "--project-dir",
+        default=".",
+        help="Path to project root",
+    )
+    invalidate_parser.add_argument(
+        "--framework",
+        choices=supported_frameworks(),
+        help="Limit invalidation to one framework",
+    )
+    invalidate_parser.add_argument(
+        "--min-observations",
+        type=int,
+        default=None,
+        help=f"Minimum observations required when rebuilding labels (default: {DEFAULT_MIN_OBSERVATIONS})",
+    )
 
     return parser
 
@@ -659,7 +686,12 @@ def run_auto(args: argparse.Namespace) -> int:
     min_observations = (
         args.min_observations
         if args.min_observations is not None
-        else _default_from_config(project_root, "observe", "min_observations", DEFAULT_MIN_OBSERVATIONS)
+        else _default_from_config(
+            project_root,
+            "observe",
+            "min_observations",
+            DEFAULT_MIN_OBSERVATIONS,
+        )
     )
     _rebuild_workspace_corpus(project_root, min_observations)
     metadata = _train_from_workspace(project_root)
@@ -695,6 +727,149 @@ def run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_history(args: argparse.Namespace) -> int:
+    if args.history_command == "invalidate":
+        return run_history_invalidate(args)
+    raise ValueError(f"Unsupported history command: {args.history_command}")
+
+
+def run_history_invalidate(args: argparse.Namespace) -> int:
+    project_root = _project_root(args.project_dir)
+    ensure_workspace(project_root)
+
+    manifests = [
+        load_manifest(path)
+        for path in list_workspace_manifests(project_root)
+    ]
+    if args.framework:
+        manifests = [
+            manifest
+            for manifest in manifests
+            if manifest.framework == args.framework
+        ]
+    test_id = _resolve_history_test_selector(
+        manifests,
+        selector=args.selector,
+    )
+
+    changed_runs = 0
+    removed_collected = 0
+    removed_outcomes = 0
+    manifests_by_run = {manifest.run_id: manifest for manifest in manifests}
+    for manifest_path in list_workspace_manifests(project_root):
+        manifest = manifests_by_run.get(manifest_path.parent.name)
+        if manifest is None:
+            continue
+        if args.framework and manifest.framework != args.framework:
+            continue
+        updated, collected_count, outcome_count = _invalidate_test_in_manifest(
+            manifest,
+            test_id=test_id,
+        )
+        if collected_count or outcome_count:
+            write_manifest(manifest_path, updated)
+            changed_runs += 1
+            removed_collected += collected_count
+            removed_outcomes += outcome_count
+
+    min_observations = (
+        args.min_observations
+        if args.min_observations is not None
+        else _default_from_config(project_root, "observe", "min_observations", DEFAULT_MIN_OBSERVATIONS)
+    )
+    _rebuild_workspace_corpus(project_root, min_observations)
+    print(
+        "Invalidated history for {test_id}; removed {outcomes} outcome(s) and "
+        "{collected} collected test record(s) from {runs} run manifest(s).".format(
+            test_id=test_id,
+            outcomes=removed_outcomes,
+            collected=removed_collected,
+            runs=changed_runs,
+        )
+    )
+    return 0
+
+
+def _resolve_history_test_selector(
+    manifests: Sequence[RunManifest],
+    *,
+    selector: str,
+) -> str:
+    test_ids = sorted(
+        {
+            item.test_id
+            for manifest in manifests
+            for item in [*manifest.collected, *manifest.outcomes]
+        }
+    )
+    if not test_ids:
+        raise ValueError("No test history found.")
+
+    matches = [test_id for test_id in test_ids if _matches_history_selector(test_id, selector)]
+    if not matches:
+        raise ValueError(f"No test history matched selector {selector!r}.")
+    if len(matches) > 1:
+        sample = "\n".join(f"  - {test_id}" for test_id in matches[:10])
+        more = "" if len(matches) <= 10 else f"\n  ... and {len(matches) - 10} more"
+        raise ValueError(
+            "Selector {selector!r} matched {count} tests; use a more specific "
+            "selector.\n{sample}{more}".format(
+                selector=selector,
+                count=len(matches),
+                sample=sample,
+                more=more,
+            )
+        )
+    return matches[0]
+
+
+def _matches_history_selector(test_id: str, selector: str) -> bool:
+    selector = selector.strip()
+    if not selector:
+        return False
+    if test_id == selector:
+        return True
+
+    parts = test_id.split("::")
+    file_part = parts[0]
+    symbol_parts = parts[1:]
+    normalized_symbols = "::".join(symbol_parts)
+
+    return (
+        file_part == selector
+        or bool(symbol_parts and symbol_parts[-1] == selector)
+        or bool(normalized_symbols and normalized_symbols == selector)
+        or test_id.endswith(f"::{selector}")
+        or selector in test_id
+    )
+
+
+def _invalidate_test_in_manifest(
+    manifest: RunManifest,
+    *,
+    test_id: str,
+) -> tuple[RunManifest, int, int]:
+    collected = [item for item in manifest.collected if item.test_id != test_id]
+    outcomes = [item for item in manifest.outcomes if item.test_id != test_id]
+    removed_collected = len(manifest.collected) - len(collected)
+    removed_outcomes = len(manifest.outcomes) - len(outcomes)
+    if not removed_collected and not removed_outcomes:
+        return manifest, 0, 0
+    return (
+        RunManifest(
+            schema_version=manifest.schema_version,
+            framework=manifest.framework,
+            run_id=manifest.run_id,
+            project_root=manifest.project_root,
+            tool=dict(manifest.tool),
+            collected=collected,
+            outcomes=outcomes,
+        ),
+        removed_collected,
+        removed_outcomes,
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
@@ -713,6 +888,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_auto(args)
         if args.command == "report":
             return run_report(args)
+        if args.command == "history":
+            return run_history(args)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
