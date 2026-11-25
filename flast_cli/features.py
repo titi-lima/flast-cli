@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .schemas import FeatureInput
+from .sources import python_module
 
 
 @dataclass(frozen=True)
@@ -201,32 +202,6 @@ def parse_pytest_test_id(test_id: str) -> Tuple[str, List[str], str]:
     return file_part, symbol_parts, normalized_test_id
 
 
-def _node_source(source: str, node: ast.AST) -> str:
-    segment = ast.get_source_segment(source, node)
-    if segment:
-        return segment
-    lines = source.splitlines()
-    start = getattr(node, "lineno", None)
-    end = getattr(node, "end_lineno", None)
-    if start is None or end is None:
-        return source
-    return "\n".join(lines[start - 1 : end])
-
-
-def _find_class(tree: ast.Module, class_name: str) -> Optional[ast.ClassDef]:
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return node
-    return None
-
-
-def _find_function(nodes: Sequence[ast.stmt], function_name: str) -> Optional[ast.AST]:
-    for node in nodes:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
-            return node
-    return None
-
-
 def resolve_feature_input(test_id: str, project_root: Path) -> FeatureInput:
     file_part, symbol_parts, normalized_test_id = parse_pytest_test_id(test_id)
     file_path = (project_root / file_part).resolve()
@@ -244,21 +219,11 @@ def resolve_feature_input(test_id: str, project_root: Path) -> FeatureInput:
             source_text=normalized_test_id,
         )
 
-    source = file_path.read_text(encoding="utf-8")
-    source_text = source
-    try:
-        tree = ast.parse(source)
-        target_node = None
-        if class_name:
-            class_node = _find_class(tree, class_name)
-            if class_node is not None and test_name:
-                target_node = _find_function(class_node.body, test_name)
-        elif test_name:
-            target_node = _find_function(tree.body, test_name)
-        if target_node is not None:
-            source_text = _node_source(source, target_node)
-    except SyntaxError:
-        source_text = source
+    module = python_module(file_path)
+    source_text = module.source
+    target_node = module.find_function(class_name, test_name) if test_name else None
+    if target_node is not None:
+        source_text = module.node_source(target_node)
 
     return FeatureInput(
         test_id=test_id,

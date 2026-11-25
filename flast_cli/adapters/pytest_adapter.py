@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import os
 import subprocess
 import sys
@@ -13,6 +12,7 @@ from .base import FrameworkAdapter
 from ..features import resolve_feature_input
 from ..manifests import load_manifest
 from ..schemas import FeatureInput, PredictionRecord, RunManifest
+from ..sources import python_module
 
 
 class PytestAdapter(FrameworkAdapter):
@@ -63,18 +63,10 @@ class PytestAdapter(FrameworkAdapter):
             return None
 
         try:
-            tree = ast.parse(file_path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, UnicodeDecodeError):
+            module = python_module(file_path)
+        except (OSError, UnicodeDecodeError):
             return None
-
-        target_node: Optional[ast.AST] = None
-        if prediction.class_name:
-            class_node = _find_class(tree, prediction.class_name)
-            if class_node is not None:
-                target_node = _find_function(class_node.body, prediction.test_name)
-        else:
-            target_node = _find_function(tree.body, prediction.test_name)
-
+        target_node = module.find_function(prediction.class_name, prediction.test_name)
         line = getattr(target_node, "lineno", None)
         return int(line) if line is not None else None
 
@@ -115,17 +107,3 @@ class PytestAdapter(FrameworkAdapter):
             str(manifest_path),
             *framework_args,
         ]
-
-
-def _find_class(tree: ast.Module, class_name: str) -> Optional[ast.ClassDef]:
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return node
-    return None
-
-
-def _find_function(nodes: Sequence[ast.stmt], test_name: str) -> Optional[ast.AST]:
-    for node in nodes:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == test_name:
-            return node
-    return None
