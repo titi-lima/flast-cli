@@ -12,6 +12,7 @@ from typing import List, Optional, Sequence, Tuple
 from .base import FrameworkAdapter
 from ..manifests import load_manifest
 from ..schemas import FeatureInput, PredictionRecord, RunManifest
+from ..sources import read_source
 
 
 class VitestAdapter(FrameworkAdapter):
@@ -65,7 +66,7 @@ class VitestAdapter(FrameworkAdapter):
                 source_text=normalized_test_id,
             )
 
-        source = file_path.read_text(encoding="utf-8")
+        source = read_source(file_path)
         source_text = _find_vitest_test_source(source, test_name) if test_name else None
         return FeatureInput(
             test_id=test_id,
@@ -91,7 +92,7 @@ class VitestAdapter(FrameworkAdapter):
         if not file_path.exists():
             return None
 
-        source = file_path.read_text(encoding="utf-8")
+        source = read_source(file_path)
         return _find_vitest_test_line(source, prediction.test_name)
 
     def run(
